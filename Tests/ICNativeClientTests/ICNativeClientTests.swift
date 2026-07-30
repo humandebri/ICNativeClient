@@ -6,6 +6,13 @@ import XCTest
 import ICNativeClient
 
 final class ICNativeClientTests: XCTestCase {
+    func testAuthorizationTimedOutDescriptionIsRetryable() {
+        XCTAssertEqual(
+            ICClientError.authorizationTimedOut.errorDescription,
+            "Internet Identity authorization timed out. Please try again."
+        )
+    }
+
     func testPrincipalRoundTrip() throws {
         let principal = try XCTUnwrap(ICPrincipal.parse("bkyz2-fmaaa-aaaaa-qaaaq-cai"))
         XCTAssertEqual(ICPrincipal.text(from: principal), "bkyz2-fmaaa-aaaaa-qaaaq-cai")
