@@ -30,6 +30,25 @@ let reply = try await client.queryRaw(method: "some_query", arg: candidArg)
 
 For signed calls, obtain an `ICAuthSession` through `ICInternetIdentityAuthenticator` or restore one with `ICIdentityStore`.
 
+## Internet Identity Authentication
+
+`ICInternetIdentityAuthenticator.authenticate()` opens the configured native-auth
+bridge in `ASWebAuthenticationSession`. Authorization is bounded to 330 seconds
+by default and throws `ICClientError.authorizationTimedOut` when that deadline
+expires. Task cancellation also cancels the active browser session.
+
+```swift
+let session = try await authenticator.authenticate(
+    timeout: .seconds(330),
+    prefersEphemeralWebBrowserSession: false
+)
+```
+
+The normal shared browser session is the default so passkeys and existing
+Internet Identity sessions remain available. Set
+`prefersEphemeralWebBrowserSession` only for an explicit clean-session test; do
+not enable it as the production default.
+
 ## Certificate Verification
 
 `read_state` polling trusts the boundary node response as an update-completion signal and does not verify BLS certificates or certified data roots.
