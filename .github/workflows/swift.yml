@@ -1,0 +1,32 @@
+name: Swift
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run package tests
+        run: swift test
+
+  ios:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run iOS tests
+        run: |
+          simulator_id="$(
+            xcrun simctl list devices available -j |
+              python3 -c 'import json, sys; devices = json.load(sys.stdin)["devices"]; print(next(device["udid"] for runtime in devices.values() for device in runtime if device.get("isAvailable") and device["name"].startswith("iPhone")))'
+          )"
+          xcodebuild test \
+            -scheme ICNativeClient \
+            -destination "platform=iOS Simulator,id=${simulator_id}"

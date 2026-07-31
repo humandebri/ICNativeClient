@@ -9,6 +9,7 @@ public enum ICClientError: Error, LocalizedError, Equatable {
     case invalidIdentity(String)
     case invalidPayload
     case authorizationFailed(String)
+    case authorizationTimedOut
     case expiredDelegation
     case emptyResponse
     case invalidResponse(String)
@@ -27,6 +28,8 @@ public enum ICClientError: Error, LocalizedError, Equatable {
             return "Internet Identity returned an invalid payload."
         case .authorizationFailed(let message):
             return message
+        case .authorizationTimedOut:
+            return "Internet Identity authorization timed out. Please try again."
         case .expiredDelegation:
             return "Internet Identity delegation expired."
         case .emptyResponse:

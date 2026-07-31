@@ -6,6 +6,144 @@ import XCTest
 import ICNativeClient
 
 final class ICNativeClientTests: XCTestCase {
+    func testAuthorizationTimedOutDescriptionIsRetryable() {
+        XCTAssertEqual(
+            ICClientError.authorizationTimedOut.errorDescription,
+            "Internet Identity authorization timed out. Please try again."
+        )
+    }
+
+#if canImport(UIKit)
+    @available(iOS 17.4, *)
+    func testAuthorizationDefaultsAndURLPreserveBridgeContract() throws {
+        XCTAssertEqual(
+            ICInternetIdentityAuthenticator.defaultAuthorizationTimeout,
+            .seconds(330)
+        )
+
+        let configuration = testConfiguration()
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let url = ICInternetIdentityAuthenticator.authorizationURL(
+            authOrigin: URL(string: "https://wiki.kinic.xyz")!,
+            callbackDomain: "wiki.kinic.xyz",
+            configuration: configuration,
+            state: "expected-state",
+            privateKey: privateKey
+        )
+        let fragment = try XCTUnwrap(url.fragment)
+        let fragmentParts = fragment.split(separator: "?", maxSplits: 1)
+        XCTAssertEqual(fragmentParts.first, "/native-auth")
+        let query = fragmentParts.count == 2 ? String(fragmentParts[1]) : ""
+        var queryComponents = URLComponents()
+        queryComponents.percentEncodedQuery = query
+        let values = Dictionary(
+            uniqueKeysWithValues: (queryComponents.queryItems ?? []).compactMap { item in
+                item.value.map { (item.name, $0) }
+            }
+        )
+
+        XCTAssertEqual(url.scheme, "https")
+        XCTAssertEqual(url.host, "wiki.kinic.xyz")
+        XCTAssertEqual(values["state"], "expected-state")
+        XCTAssertEqual(values["callback"], "https://wiki.kinic.xyz/ios-auth-callback")
+        XCTAssertEqual(values["maxTimeToLive"], ICIdentityBridge.maxTimeToLiveNanos)
+        XCTAssertEqual(values["identityProvider"], configuration.identityProvider.absoluteString)
+        XCTAssertNotNil(values["sessionPublicKey"])
+    }
+
+    @available(iOS 17.4, *)
+    func testCallbackBuildsSessionForExpectedState() throws {
+        let configuration = testConfiguration()
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let payload = identityPayload(sessionPrivateKey: privateKey)
+        let callbackURL = try makeCallbackURL(
+            queryItems: [
+                URLQueryItem(name: "state", value: "expected-state"),
+                URLQueryItem(
+                    name: "result",
+                    value: ICInternetIdentityAuthenticator.base64URLEncoded(Data(payload.utf8))
+                ),
+            ]
+        )
+
+        let session = try ICInternetIdentityAuthenticator.session(
+            from: callbackURL,
+            expectedState: "expected-state",
+            privateKey: privateKey,
+            configuration: configuration
+        )
+
+        XCTAssertEqual(session.canisterId, configuration.canisterId)
+        XCTAssertEqual(session.identityProvider, configuration.identityProvider.absoluteString)
+    }
+
+    @available(iOS 17.4, *)
+    func testCallbackRejectsMismatchedState() throws {
+        let callbackURL = try makeCallbackURL(
+            queryItems: [URLQueryItem(name: "state", value: "unexpected-state")]
+        )
+
+        XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
+            from: callbackURL,
+            expectedState: "expected-state",
+            privateKey: Curve25519.Signing.PrivateKey(),
+            configuration: testConfiguration()
+        )) { error in
+            XCTAssertEqual(error as? ICClientError, .invalidPayload)
+        }
+    }
+
+    @available(iOS 17.4, *)
+    func testCallbackRejectsDuplicateQueryItems() throws {
+        let callbackURL = try makeCallbackURL(
+            queryItems: [
+                URLQueryItem(name: "state", value: "expected-state"),
+                URLQueryItem(name: "state", value: "expected-state"),
+            ]
+        )
+
+        XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
+            from: callbackURL,
+            expectedState: "expected-state",
+            privateKey: Curve25519.Signing.PrivateKey(),
+            configuration: testConfiguration()
+        )) { error in
+            XCTAssertEqual(error as? ICClientError, .invalidPayload)
+        }
+    }
+
+    @available(iOS 17.4, *)
+    func testCallbackRejectsMalformedPayload() throws {
+        let callbackURL = try makeCallbackURL(
+            queryItems: [
+                URLQueryItem(name: "state", value: "expected-state"),
+                URLQueryItem(
+                    name: "result",
+                    value: ICInternetIdentityAuthenticator.base64URLEncoded(Data("{".utf8))
+                ),
+            ]
+        )
+
+        XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
+            from: callbackURL,
+            expectedState: "expected-state",
+            privateKey: Curve25519.Signing.PrivateKey(),
+            configuration: testConfiguration()
+        )) { error in
+            XCTAssertEqual(error as? ICClientError, .invalidPayload)
+        }
+    }
+
+    private func makeCallbackURL(queryItems: [URLQueryItem]) throws -> URL {
+        var components = URLComponents(
+            url: URL(string: "https://wiki.kinic.xyz/ios-auth-callback")!,
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = queryItems
+        return try XCTUnwrap(components?.url)
+    }
+#endif
+
     func testPrincipalRoundTrip() throws {
         let principal = try XCTUnwrap(ICPrincipal.parse("bkyz2-fmaaa-aaaaa-qaaaq-cai"))
         XCTAssertEqual(ICPrincipal.text(from: principal), "bkyz2-fmaaa-aaaaa-qaaaq-cai")
