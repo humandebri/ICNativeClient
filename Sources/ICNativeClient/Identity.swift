@@ -100,7 +100,7 @@ public final class ICIdentityStore {
             return nil
         }
         do {
-            try ICIdentityBridge.validateSession(session, configuration: configuration)
+            try ICIdentitySession.validateSession(session, configuration: configuration)
             return session
         } catch {
             clear()
@@ -109,7 +109,7 @@ public final class ICIdentityStore {
     }
 
     public func save(_ session: ICAuthSession) throws {
-        try ICIdentityBridge.validateSession(session, configuration: configuration)
+        try ICIdentitySession.validateSession(session, configuration: configuration)
         let data = try JSONEncoder().encode(session)
         clear()
         var query = baseQuery()
@@ -134,35 +134,19 @@ public final class ICIdentityStore {
     }
 }
 
-public enum ICIdentityBridge {
+public enum ICIdentitySession {
     public static let maxTimeToLiveNanos = "2592000000000000"
     public static let ed25519DERPrefix = Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00])
 
     public static func makeSession(
-        from payload: String,
         privateKey: Curve25519.Signing.PrivateKey,
-        configuration: ICClientConfiguration
+        delegation: ICDelegationChain,
+        configuration: ICClientConfiguration,
+        createdAt: Date = Date()
     ) throws -> ICAuthSession {
-        guard let data = payload.data(using: .utf8) else {
-            throw ICClientError.invalidPayload
-        }
-        let response: InternetIdentityResponse
-        do {
-            response = try JSONDecoder().decode(InternetIdentityResponse.self, from: data)
-        } catch {
-            throw ICClientError.invalidPayload
-        }
-        if response.kind == "authorize-client-failure" {
-            throw ICClientError.authorizationFailed(response.text ?? response.message ?? "Internet Identity authorization failed.")
-        }
-        guard response.kind == "authorize-client-success" else {
-            throw ICClientError.invalidPayload
-        }
-
         let sessionPublicKey = derPublicKey(from: privateKey.publicKey.rawRepresentation)
-        let chain = try response.delegationChain()
-        try validate(chain, expectedSessionPublicKey: sessionPublicKey, canisterId: configuration.canisterId)
-        let principal = ICPrincipal.text(from: ICPrincipal.selfAuthenticatingPublicKey(chain.publicKey))
+        try validate(delegation, expectedSessionPublicKey: sessionPublicKey, canisterId: configuration.canisterId)
+        let principal = ICPrincipal.text(from: ICPrincipal.selfAuthenticatingPublicKey(delegation.publicKey))
         return ICAuthSession(
             principal: principal,
             canisterId: configuration.canisterId,
@@ -170,18 +154,9 @@ public enum ICIdentityBridge {
             derivationOrigin: configuration.derivationOrigin,
             sessionPublicKey: sessionPublicKey,
             sessionPrivateKey: privateKey.rawRepresentation,
-            delegation: chain,
-            createdAt: Date()
+            delegation: delegation,
+            createdAt: createdAt
         )
-    }
-
-    public static func authorizeClientRequest(publicKey: Data) -> Data {
-        let request = AuthorizeClientRequest(
-            kind: "authorize-client",
-            sessionPublicKey: Array(publicKey),
-            maxTimeToLive: maxTimeToLiveNanos
-        )
-        return (try? JSONEncoder().encode(request)) ?? Data("{}".utf8)
     }
 
     public static func derPublicKey(from rawPublicKey: Data) -> Data {
@@ -225,111 +200,5 @@ public enum ICIdentityBridge {
                 throw ICClientError.invalidPayload
             }
         }
-    }
-}
-
-private struct AuthorizeClientRequest: Encodable {
-    let kind: String
-    let sessionPublicKey: [UInt8]
-    let maxTimeToLive: String
-}
-
-private struct InternetIdentityResponse: Decodable {
-    let kind: String
-    let text: String?
-    let message: String?
-    let userPublicKey: BytesValue?
-    let publicKey: BytesValue?
-    let delegation: DelegationContainer?
-    let delegations: [SignedDelegationPayload]?
-
-    func delegationChain() throws -> ICDelegationChain {
-        let chainObject = delegation ?? DelegationContainer(
-            userPublicKey: userPublicKey,
-            publicKey: publicKey,
-            delegations: delegations
-        )
-        guard let publicKey = chainObject.userPublicKey?.data ?? chainObject.publicKey?.data,
-              let rawDelegations = chainObject.delegations else {
-            throw ICClientError.invalidPayload
-        }
-        let signedDelegations = try rawDelegations.map { raw -> ICDelegationChain.SignedDelegation in
-            guard let publicKey = raw.delegation.publicKey.data,
-                  let expiration = raw.delegation.expiration.value,
-                  let signature = raw.signature.data else {
-                throw ICClientError.invalidPayload
-            }
-            let targets = try raw.delegation.targets?.map { target -> Data in
-                guard let data = target.data else {
-                    throw ICClientError.invalidPayload
-                }
-                return data
-            }
-            return ICDelegationChain.SignedDelegation(
-                delegation: .init(publicKey: publicKey, expiration: expiration, targets: targets),
-                signature: signature
-            )
-        }
-        guard !signedDelegations.isEmpty else {
-            throw ICClientError.invalidPayload
-        }
-        return ICDelegationChain(publicKey: publicKey, delegations: signedDelegations)
-    }
-}
-
-private struct DelegationContainer: Decodable {
-    let userPublicKey: BytesValue?
-    let publicKey: BytesValue?
-    let delegations: [SignedDelegationPayload]?
-}
-
-private struct SignedDelegationPayload: Decodable {
-    let delegation: DelegationPayload
-    let signature: BytesValue
-}
-
-private struct DelegationPayload: Decodable {
-    let publicKey: BytesValue
-    let expiration: UInt64Value
-    let targets: [BytesValue]?
-
-    enum CodingKeys: String, CodingKey {
-        case publicKey = "pubkey"
-        case expiration
-        case targets
-    }
-}
-
-private struct BytesValue: Decodable {
-    let data: Data?
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if let hex = try? container.decode(String.self) {
-            data = Data(icHex: hex)
-            return
-        }
-        if let bytes = try? container.decode([UInt8].self) {
-            data = Data(bytes)
-            return
-        }
-        data = nil
-    }
-}
-
-private struct UInt64Value: Decodable {
-    let value: UInt64?
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if let text = try? container.decode(String.self) {
-            if text.hasPrefix("0x") {
-                value = UInt64(text.dropFirst(2), radix: 16)
-            } else {
-                value = UInt64(text, radix: 10)
-            }
-            return
-        }
-        value = try? container.decode(UInt64.self)
     }
 }

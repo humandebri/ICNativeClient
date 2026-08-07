@@ -192,7 +192,7 @@ public final class ICClient {
 
     public func validateIdentity(_ identity: ICAuthSession, requestCanisterId: String) throws {
         do {
-            try ICIdentityBridge.validateSession(identity, configuration: configuration, requestCanisterId: requestCanisterId)
+            try ICIdentitySession.validateSession(identity, configuration: configuration, requestCanisterId: requestCanisterId)
         } catch ICClientError.invalidPayload {
             throw ICClientError.invalidIdentity("Internet Identity session is not valid for this canister.")
         } catch {

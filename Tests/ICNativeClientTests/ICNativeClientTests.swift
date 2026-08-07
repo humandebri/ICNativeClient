@@ -15,7 +15,7 @@ final class ICNativeClientTests: XCTestCase {
 
 #if canImport(UIKit)
     @available(iOS 17.4, *)
-    func testAuthorizationDefaultsAndURLPreserveBridgeContract() throws {
+    func testAuthorizationURLUsesICRC167DelegationRequest() throws {
         XCTAssertEqual(
             ICInternetIdentityAuthenticator.defaultAuthorizationTimeout,
             .seconds(330)
@@ -23,19 +23,16 @@ final class ICNativeClientTests: XCTestCase {
 
         let configuration = testConfiguration()
         let privateKey = Curve25519.Signing.PrivateKey()
-        let url = ICInternetIdentityAuthenticator.authorizationURL(
-            authOrigin: URL(string: "https://wiki.kinic.xyz")!,
+        let url = try ICInternetIdentityAuthenticator.authorizationURL(
             callbackDomain: "wiki.kinic.xyz",
             configuration: configuration,
             state: "expected-state",
+            requestID: "request-1",
             privateKey: privateKey
         )
         let fragment = try XCTUnwrap(url.fragment)
-        let fragmentParts = fragment.split(separator: "?", maxSplits: 1)
-        XCTAssertEqual(fragmentParts.first, "/native-auth")
-        let query = fragmentParts.count == 2 ? String(fragmentParts[1]) : ""
         var queryComponents = URLComponents()
-        queryComponents.percentEncodedQuery = query
+        queryComponents.percentEncodedQuery = fragment
         let values = Dictionary(
             uniqueKeysWithValues: (queryComponents.queryItems ?? []).compactMap { item in
                 item.value.map { (item.name, $0) }
@@ -43,50 +40,66 @@ final class ICNativeClientTests: XCTestCase {
         )
 
         XCTAssertEqual(url.scheme, "https")
-        XCTAssertEqual(url.host, "wiki.kinic.xyz")
+        XCTAssertEqual(url.host, "id.ai")
+        XCTAssertEqual(url.path, "/authorize")
         XCTAssertEqual(values["state"], "expected-state")
         XCTAssertEqual(values["callback"], "https://wiki.kinic.xyz/ios-auth-callback")
-        XCTAssertEqual(values["maxTimeToLive"], ICIdentityBridge.maxTimeToLiveNanos)
-        XCTAssertEqual(values["identityProvider"], configuration.identityProvider.absoluteString)
-        XCTAssertNotNil(values["sessionPublicKey"])
+        let message = try XCTUnwrap(values["message"]?.data(using: .utf8))
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: message) as? [String: Any])
+        let params = try XCTUnwrap(request["params"] as? [String: Any])
+        XCTAssertEqual(request["jsonrpc"] as? String, "2.0")
+        XCTAssertEqual(request["id"] as? String, "request-1")
+        XCTAssertEqual(request["method"] as? String, "icrc34_delegation")
+        XCTAssertEqual(params["maxTimeToLive"] as? String, ICIdentitySession.maxTimeToLiveNanos)
+        XCTAssertEqual(params["icrc95DerivationOrigin"] as? String, configuration.derivationOrigin)
+        XCTAssertEqual(
+            Data(base64Encoded: try XCTUnwrap(params["publicKey"] as? String)),
+            ICIdentitySession.derPublicKey(from: privateKey.publicKey.rawRepresentation)
+        )
     }
 
     @available(iOS 17.4, *)
-    func testCallbackBuildsSessionForExpectedState() throws {
+    func testCallbackBuildsTwoHopDelegationSession() throws {
         let configuration = testConfiguration()
         let privateKey = Curve25519.Signing.PrivateKey()
-        let payload = identityPayload(sessionPrivateKey: privateKey)
-        let callbackURL = try makeCallbackURL(
-            queryItems: [
-                URLQueryItem(name: "state", value: "expected-state"),
-                URLQueryItem(
-                    name: "result",
-                    value: ICInternetIdentityAuthenticator.base64URLEncoded(Data(payload.utf8))
-                ),
-            ]
+        let callbackURL = try makeICRC167CallbackURL(
+            state: "expected-state",
+            message: delegationResponse(
+                requestID: "request-1",
+                sessionPrivateKey: privateKey,
+                delegationCount: 2
+            )
         )
 
         let session = try ICInternetIdentityAuthenticator.session(
             from: callbackURL,
+            callbackDomain: "wiki.kinic.xyz",
             expectedState: "expected-state",
+            expectedRequestID: "request-1",
             privateKey: privateKey,
             configuration: configuration
         )
 
         XCTAssertEqual(session.canisterId, configuration.canisterId)
         XCTAssertEqual(session.identityProvider, configuration.identityProvider.absoluteString)
+        XCTAssertEqual(session.delegation.delegations.count, 2)
+        XCTAssertEqual(session.delegation.delegations.last?.delegation.publicKey, session.sessionPublicKey)
     }
 
     @available(iOS 17.4, *)
-    func testCallbackRejectsMismatchedState() throws {
-        let callbackURL = try makeCallbackURL(
-            queryItems: [URLQueryItem(name: "state", value: "unexpected-state")]
+    func testCallbackRejectsMismatchedStateAndRequestID() throws {
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let callbackURL = try makeICRC167CallbackURL(
+            state: "unexpected-state",
+            message: delegationResponse(requestID: "unexpected-request", sessionPrivateKey: privateKey)
         )
 
         XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
             from: callbackURL,
+            callbackDomain: "wiki.kinic.xyz",
             expectedState: "expected-state",
-            privateKey: Curve25519.Signing.PrivateKey(),
+            expectedRequestID: "request-1",
+            privateKey: privateKey,
             configuration: testConfiguration()
         )) { error in
             XCTAssertEqual(error as? ICClientError, .invalidPayload)
@@ -94,9 +107,11 @@ final class ICNativeClientTests: XCTestCase {
     }
 
     @available(iOS 17.4, *)
-    func testCallbackRejectsDuplicateQueryItems() throws {
+    func testCallbackRejectsDuplicateFragmentItems() throws {
+        let privateKey = Curve25519.Signing.PrivateKey()
         let callbackURL = try makeCallbackURL(
-            queryItems: [
+            fragmentItems: [
+                URLQueryItem(name: "message", value: delegationResponse(requestID: "request-1", sessionPrivateKey: privateKey)),
                 URLQueryItem(name: "state", value: "expected-state"),
                 URLQueryItem(name: "state", value: "expected-state"),
             ]
@@ -104,8 +119,10 @@ final class ICNativeClientTests: XCTestCase {
 
         XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
             from: callbackURL,
+            callbackDomain: "wiki.kinic.xyz",
             expectedState: "expected-state",
-            privateKey: Curve25519.Signing.PrivateKey(),
+            expectedRequestID: "request-1",
+            privateKey: privateKey,
             configuration: testConfiguration()
         )) { error in
             XCTAssertEqual(error as? ICClientError, .invalidPayload)
@@ -113,33 +130,159 @@ final class ICNativeClientTests: XCTestCase {
     }
 
     @available(iOS 17.4, *)
-    func testCallbackRejectsMalformedPayload() throws {
-        let callbackURL = try makeCallbackURL(
-            queryItems: [
-                URLQueryItem(name: "state", value: "expected-state"),
-                URLQueryItem(
-                    name: "result",
-                    value: ICInternetIdentityAuthenticator.base64URLEncoded(Data("{".utf8))
-                ),
-            ]
+    func testCallbackSurfacesRPCError() throws {
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let callbackURL = try makeICRC167CallbackURL(
+            state: "expected-state",
+            message: #"{"jsonrpc":"2.0","id":"request-1","error":{"code":1000,"message":"denied"}}"#
         )
 
         XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
             from: callbackURL,
+            callbackDomain: "wiki.kinic.xyz",
             expectedState: "expected-state",
-            privateKey: Curve25519.Signing.PrivateKey(),
+            expectedRequestID: "request-1",
+            privateKey: privateKey,
             configuration: testConfiguration()
         )) { error in
-            XCTAssertEqual(error as? ICClientError, .invalidPayload)
+            XCTAssertEqual(error as? ICClientError, .authorizationFailed("denied"))
         }
     }
 
-    private func makeCallbackURL(queryItems: [URLQueryItem]) throws -> URL {
+    @available(iOS 17.4, *)
+    func testCallbackRejectsInvalidBase64AndExcessiveLifetime() throws {
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let invalidBase64 = try makeICRC167CallbackURL(
+            state: "expected-state",
+            message: delegationResponse(
+                requestID: "request-1",
+                sessionPrivateKey: privateKey,
+                rootPublicKey: "***"
+            )
+        )
+        XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
+            from: invalidBase64,
+            callbackDomain: "wiki.kinic.xyz",
+            expectedState: "expected-state",
+            expectedRequestID: "request-1",
+            privateKey: privateKey,
+            configuration: testConfiguration()
+        ))
+
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let excessiveExpiration = UInt64((now.timeIntervalSince1970 + 31 * 24 * 60 * 60) * 1_000_000_000)
+        let excessiveLifetime = try makeICRC167CallbackURL(
+            state: "expected-state",
+            message: delegationResponse(
+                requestID: "request-1",
+                sessionPrivateKey: privateKey,
+                expiration: excessiveExpiration
+            )
+        )
+        XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
+            from: excessiveLifetime,
+            callbackDomain: "wiki.kinic.xyz",
+            expectedState: "expected-state",
+            expectedRequestID: "request-1",
+            privateKey: privateKey,
+            configuration: testConfiguration(),
+            now: now
+        ))
+    }
+
+    @available(iOS 17.4, *)
+    func testCallbackRejectsWrongLeafAndTargetScope() throws {
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let otherKey = Curve25519.Signing.PrivateKey()
+        let wrongLeaf = try makeICRC167CallbackURL(
+            state: "expected-state",
+            message: delegationResponse(
+                requestID: "request-1",
+                sessionPrivateKey: privateKey,
+                leafPublicKey: ICIdentitySession.derPublicKey(from: otherKey.publicKey.rawRepresentation)
+            )
+        )
+        XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
+            from: wrongLeaf,
+            callbackDomain: "wiki.kinic.xyz",
+            expectedState: "expected-state",
+            expectedRequestID: "request-1",
+            privateKey: privateKey,
+            configuration: testConfiguration()
+        ))
+
+        let wrongTarget = try makeICRC167CallbackURL(
+            state: "expected-state",
+            message: delegationResponse(
+                requestID: "request-1",
+                sessionPrivateKey: privateKey,
+                targets: ["aaaaa-aa"]
+            )
+        )
+        XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
+            from: wrongTarget,
+            callbackDomain: "wiki.kinic.xyz",
+            expectedState: "expected-state",
+            expectedRequestID: "request-1",
+            privateKey: privateKey,
+            configuration: testConfiguration()
+        ))
+    }
+
+    private func makeICRC167CallbackURL(state: String, message: String) throws -> URL {
+        try makeCallbackURL(
+            fragmentItems: [
+                URLQueryItem(name: "message", value: message),
+                URLQueryItem(name: "state", value: state),
+            ]
+        )
+    }
+
+    private func delegationResponse(
+        requestID: String,
+        sessionPrivateKey: Curve25519.Signing.PrivateKey,
+        rootPublicKey: String? = nil,
+        leafPublicKey: Data? = nil,
+        delegationCount: Int = 1,
+        expiration: UInt64 = UInt64((Date().timeIntervalSince1970 + 3600) * 1_000_000_000),
+        targets: [String]? = nil
+    ) -> String {
+        let sessionKey = leafPublicKey ?? ICIdentitySession.derPublicKey(from: sessionPrivateKey.publicKey.rawRepresentation)
+        let rootKey = ICIdentitySession.derPublicKey(from: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation)
+        let intermediateKey = ICIdentitySession.derPublicKey(from: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation)
+        let delegatedKeys = delegationCount == 2 ? [intermediateKey, sessionKey] : [sessionKey]
+        let signedDelegations: [[String: Any]] = delegatedKeys.map { delegatedKey in
+            var delegation: [String: Any] = [
+                "pubkey": delegatedKey.base64EncodedString(),
+                "expiration": String(expiration),
+            ]
+            if let targets {
+                delegation["targets"] = targets
+            }
+            return [
+                "delegation": delegation,
+                "signature": Data(repeating: 7, count: 64).base64EncodedString(),
+            ]
+        }
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": requestID,
+            "result": [
+                "publicKey": rootPublicKey ?? rootKey.base64EncodedString(),
+                "signerDelegation": signedDelegations,
+            ],
+        ]
+        return String(decoding: try! JSONSerialization.data(withJSONObject: response), as: UTF8.self)
+    }
+
+    private func makeCallbackURL(fragmentItems: [URLQueryItem]) throws -> URL {
         var components = URLComponents(
             url: URL(string: "https://wiki.kinic.xyz/ios-auth-callback")!,
             resolvingAgainstBaseURL: false
         )
-        components?.queryItems = queryItems
+        var fragment = URLComponents()
+        fragment.queryItems = fragmentItems
+        components?.percentEncodedFragment = fragment.percentEncodedQuery
         return try XCTUnwrap(components?.url)
     }
 #endif
@@ -167,48 +310,38 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertEqual(ICPAmount.format(100_000_000, units: false), "1")
     }
 
-    func testIdentityPayloadBuildsValidatedSession() throws {
+    func testIdentitySessionBuildsValidatedSession() throws {
         let configuration = testConfiguration()
         let privateKey = Curve25519.Signing.PrivateKey()
         let target = try XCTUnwrap(ICPrincipal.parse(configuration.canisterId))
-        let payload = identityPayload(sessionPrivateKey: privateKey, targets: [target])
+        let chain = delegationChain(sessionPrivateKey: privateKey, targets: [target])
 
-        let session = try ICIdentityBridge.makeSession(
-            from: payload,
+        let session = try ICIdentitySession.makeSession(
             privateKey: privateKey,
+            delegation: chain,
             configuration: configuration
         )
 
         XCTAssertEqual(session.canisterId, configuration.canisterId)
         XCTAssertEqual(session.identityProvider, configuration.identityProvider.absoluteString)
         XCTAssertEqual(session.derivationOrigin, configuration.derivationOrigin)
-        XCTAssertEqual(session.sessionPublicKey, ICIdentityBridge.derPublicKey(from: privateKey.publicKey.rawRepresentation))
+        XCTAssertEqual(session.sessionPublicKey, ICIdentitySession.derPublicKey(from: privateKey.publicKey.rawRepresentation))
         XCTAssertEqual(session.delegation.delegations.count, 1)
     }
 
-    func testIdentityPayloadRejectsMismatchedSessionKey() throws {
+    func testIdentitySessionRejectsMismatchedSessionKey() throws {
         let privateKey = Curve25519.Signing.PrivateKey()
         let otherKey = Curve25519.Signing.PrivateKey()
-        let payload = identityPayload(
+        let chain = delegationChain(
             sessionPrivateKey: privateKey,
-            delegatedPublicKey: ICIdentityBridge.derPublicKey(from: otherKey.publicKey.rawRepresentation)
+            delegatedPublicKey: ICIdentitySession.derPublicKey(from: otherKey.publicKey.rawRepresentation)
         )
 
-        XCTAssertThrowsError(try ICIdentityBridge.makeSession(
-            from: payload,
+        XCTAssertThrowsError(try ICIdentitySession.makeSession(
             privateKey: privateKey,
+            delegation: chain,
             configuration: testConfiguration()
         ))
-    }
-
-    func testIdentityPayloadRejectsMalformedJSONWithPublicError() {
-        XCTAssertThrowsError(try ICIdentityBridge.makeSession(
-            from: "{",
-            privateKey: Curve25519.Signing.PrivateKey(),
-            configuration: testConfiguration()
-        )) { error in
-            XCTAssertEqual(error as? ICClientError, .invalidPayload)
-        }
     }
 
     func testCBORRejectsOversizedByteStringLength() {
@@ -220,10 +353,9 @@ final class ICNativeClientTests: XCTestCase {
     func testSignedEnvelopeContainsDelegationFields() throws {
         let configuration = testConfiguration()
         let privateKey = Curve25519.Signing.PrivateKey()
-        let payload = identityPayload(sessionPrivateKey: privateKey)
-        let session = try ICIdentityBridge.makeSession(
-            from: payload,
+        let session = try ICIdentitySession.makeSession(
             privateKey: privateKey,
+            delegation: delegationChain(sessionPrivateKey: privateKey),
             configuration: configuration
         )
         let content: ICCBOR.Value = .map([
@@ -333,7 +465,7 @@ final class ICNativeClientTests: XCTestCase {
     private func testConfiguration() -> ICClientConfiguration {
         ICClientConfiguration(
             canisterId: "bkyz2-fmaaa-aaaaa-qaaaq-cai",
-            identityProvider: URL(string: "https://id.ai/#authorize")!,
+            identityProvider: URL(string: "https://id.ai/authorize")!,
             derivationOrigin: "https://bkyz2-fmaaa-aaaaa-qaaaq-cai.icp0.io"
         )
     }
@@ -352,9 +484,9 @@ final class ICNativeClientTests: XCTestCase {
 
     private func makeAuthSession() throws -> ICAuthSession {
         let privateKey = Curve25519.Signing.PrivateKey()
-        return try ICIdentityBridge.makeSession(
-            from: identityPayload(sessionPrivateKey: privateKey),
+        return try ICIdentitySession.makeSession(
             privateKey: privateKey,
+            delegation: delegationChain(sessionPrivateKey: privateKey),
             configuration: testConfiguration()
         )
     }
@@ -380,21 +512,27 @@ final class ICNativeClientTests: XCTestCase {
         ]))
     }
 
-    private func identityPayload(
+    private func delegationChain(
         sessionPrivateKey: Curve25519.Signing.PrivateKey,
         expiration: UInt64 = UInt64((Date().timeIntervalSince1970 + 3600) * 1_000_000_000),
         targets: [Data]? = nil,
         delegatedPublicKey: Data? = nil
-    ) -> String {
-        let sessionPublicKey = delegatedPublicKey ?? ICIdentityBridge.derPublicKey(from: sessionPrivateKey.publicKey.rawRepresentation)
-        let rootPublicKey = ICIdentityBridge.derPublicKey(from: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation)
-        let signature = Data(repeating: 7, count: 64)
-        let targetJSON = targets.map { values in
-            #","targets":[\#(values.map { #""\#($0.icHexString)""# }.joined(separator: ","))]"#
-        } ?? ""
-        return """
-        {"kind":"authorize-client-success","userPublicKey":"\(rootPublicKey.icHexString)","delegations":[{"delegation":{"pubkey":"\(sessionPublicKey.icHexString)","expiration":"\(expiration)"\(targetJSON)},"signature":"\(signature.icHexString)"}]}
-        """
+    ) -> ICDelegationChain {
+        let sessionPublicKey = delegatedPublicKey ?? ICIdentitySession.derPublicKey(from: sessionPrivateKey.publicKey.rawRepresentation)
+        let rootPublicKey = ICIdentitySession.derPublicKey(from: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation)
+        return ICDelegationChain(
+            publicKey: rootPublicKey,
+            delegations: [
+                .init(
+                    delegation: .init(
+                        publicKey: sessionPublicKey,
+                        expiration: expiration,
+                        targets: targets
+                    ),
+                    signature: Data(repeating: 7, count: 64)
+                ),
+            ]
+        )
     }
 }
 

@@ -18,7 +18,7 @@ public struct ICClientConfiguration: Equatable, Sendable {
     public init(
         canisterId: String,
         apiBaseURL: URL = URL(string: "https://ic0.app")!,
-        identityProvider: URL = URL(string: "https://id.ai/#authorize")!,
+        identityProvider: URL = URL(string: "https://id.ai/authorize")!,
         derivationOrigin: String
     ) {
         self.canisterId = canisterId

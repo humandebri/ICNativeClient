@@ -9,8 +9,8 @@ Reusable Swift Package for a native iOS Internet Computer client.
 - CBOR envelopes for `/api/v3/canister/.../query`, `/api/v4/canister/.../call`,
   `/api/v3/canister/.../read_state`, with v2 call fallback.
 - Signed calls using an Internet Identity delegation session.
-- Internet Identity session parsing and Keychain storage.
-- iOS `ASWebAuthenticationSession` bridge helper for `/native-auth` style flows.
+- Internet Identity delegation sessions and Keychain storage.
+- iOS `ASWebAuthenticationSession` authenticator using the ICRC-167 URL transport.
 
 This package returns raw canister reply bytes. It does not provide a general Candid implementation.
 Callers should encode/decode Candid payloads themselves or add a canister-specific layer above `ICClient`.
@@ -32,8 +32,8 @@ For signed calls, obtain an `ICAuthSession` through `ICInternetIdentityAuthentic
 
 ## Internet Identity Authentication
 
-`ICInternetIdentityAuthenticator.authenticate()` opens the configured native-auth
-bridge in `ASWebAuthenticationSession`. Authorization is bounded to 330 seconds
+`ICInternetIdentityAuthenticator.authenticate()` opens Internet Identity directly
+in `ASWebAuthenticationSession`. Authorization is bounded to 330 seconds
 by default and throws `ICClientError.authorizationTimedOut` when that deadline
 expires. Task cancellation also cancels the active browser session.
 
