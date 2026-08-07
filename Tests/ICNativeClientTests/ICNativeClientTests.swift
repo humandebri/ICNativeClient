@@ -22,7 +22,13 @@ final class ICNativeClientTests: XCTestCase {
         )
 
         let configuration = testConfiguration()
-        let privateKey = Curve25519.Signing.PrivateKey()
+        var privateKey = Curve25519.Signing.PrivateKey()
+        while !ICIdentitySession
+            .derPublicKey(from: privateKey.publicKey.rawRepresentation)
+            .base64EncodedString()
+            .contains("+") {
+            privateKey = Curve25519.Signing.PrivateKey()
+        }
         let url = try ICInternetIdentityAuthenticator.authorizationURL(
             callbackDomain: "wiki.kinic.xyz",
             configuration: configuration,
@@ -42,6 +48,11 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertEqual(url.scheme, "https")
         XCTAssertEqual(url.host, "id.ai")
         XCTAssertEqual(url.path, "/authorize")
+        let percentEncodedFragment = try XCTUnwrap(
+            URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedFragment
+        )
+        XCTAssertTrue(percentEncodedFragment.contains("%2B"))
+        XCTAssertFalse(percentEncodedFragment.contains("+"))
         XCTAssertEqual(values["state"], "expected-state")
         XCTAssertEqual(values["callback"], "https://wiki.kinic.xyz/ios-auth-callback")
         let message = try XCTUnwrap(values["message"]?.data(using: .utf8))

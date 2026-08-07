@@ -147,7 +147,13 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
         guard let encodedFragment = fragment.percentEncodedQuery else {
             throw ICClientError.invalidPayload
         }
-        provider?.percentEncodedFragment = encodedFragment
+        // URLSearchParams decodes a literal "+" as a space. Foundation leaves
+        // base64 plus signs unescaped in query items, so make them unambiguous
+        // before the browser parses the fragment.
+        provider?.percentEncodedFragment = encodedFragment.replacingOccurrences(
+            of: "+",
+            with: "%2B"
+        )
         guard let url = provider?.url else {
             throw ICClientError.invalidPayload
         }
