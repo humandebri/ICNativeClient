@@ -6,6 +6,8 @@ import XCTest
 import ICNativeClient
 
 final class ICNativeClientTests: XCTestCase {
+    private let callbackPath = "/native-auth-callback"
+
     func testAuthorizationTimedOutDescriptionIsRetryable() {
         XCTAssertEqual(
             ICClientError.authorizationTimedOut.errorDescription,
@@ -31,6 +33,7 @@ final class ICNativeClientTests: XCTestCase {
         }
         let url = try ICInternetIdentityAuthenticator.authorizationURL(
             callbackDomain: "wiki.kinic.xyz",
+            callbackPath: callbackPath,
             configuration: configuration,
             state: "expected-state",
             requestID: "request-1",
@@ -54,7 +57,7 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertTrue(percentEncodedFragment.contains("%2B"))
         XCTAssertFalse(percentEncodedFragment.contains("+"))
         XCTAssertEqual(values["state"], "expected-state")
-        XCTAssertEqual(values["callback"], "https://wiki.kinic.xyz/ios-auth-callback")
+        XCTAssertEqual(values["callback"], "https://wiki.kinic.xyz/native-auth-callback")
         let message = try XCTUnwrap(values["message"]?.data(using: .utf8))
         let request = try XCTUnwrap(JSONSerialization.jsonObject(with: message) as? [String: Any])
         let params = try XCTUnwrap(request["params"] as? [String: Any])
@@ -85,6 +88,7 @@ final class ICNativeClientTests: XCTestCase {
         let session = try ICInternetIdentityAuthenticator.session(
             from: callbackURL,
             callbackDomain: "wiki.kinic.xyz",
+            callbackPath: callbackPath,
             expectedState: "expected-state",
             expectedRequestID: "request-1",
             privateKey: privateKey,
@@ -108,10 +112,48 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
             from: callbackURL,
             callbackDomain: "wiki.kinic.xyz",
+            callbackPath: callbackPath,
             expectedState: "expected-state",
             expectedRequestID: "request-1",
             privateKey: privateKey,
             configuration: testConfiguration()
+        )) { error in
+            XCTAssertEqual(error as? ICClientError, .invalidPayload)
+        }
+    }
+
+    @available(iOS 17.4, *)
+    func testCallbackRejectsOldPath() throws {
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let callbackURL = try makeCallbackURL(
+            path: "/ios-auth-callback",
+            fragmentItems: [
+                URLQueryItem(
+                    name: "message",
+                    value: delegationResponse(requestID: "request-1", sessionPrivateKey: privateKey)
+                ),
+                URLQueryItem(name: "state", value: "expected-state"),
+            ]
+        )
+
+        XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
+            from: callbackURL,
+            callbackDomain: "wiki.kinic.xyz",
+            callbackPath: callbackPath,
+            expectedState: "expected-state",
+            expectedRequestID: "request-1",
+            privateKey: privateKey,
+            configuration: testConfiguration()
+        )) { error in
+            XCTAssertEqual(error as? ICClientError, .invalidPayload)
+        }
+    }
+
+    @available(iOS 17.4, *)
+    func testCallbackURLRejectsInvalidPath() {
+        XCTAssertThrowsError(try ICInternetIdentityAuthenticator.callbackURL(
+            callbackDomain: "wiki.kinic.xyz",
+            callbackPath: "native-auth-callback"
         )) { error in
             XCTAssertEqual(error as? ICClientError, .invalidPayload)
         }
@@ -131,6 +173,7 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
             from: callbackURL,
             callbackDomain: "wiki.kinic.xyz",
+            callbackPath: callbackPath,
             expectedState: "expected-state",
             expectedRequestID: "request-1",
             privateKey: privateKey,
@@ -151,6 +194,7 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
             from: callbackURL,
             callbackDomain: "wiki.kinic.xyz",
+            callbackPath: callbackPath,
             expectedState: "expected-state",
             expectedRequestID: "request-1",
             privateKey: privateKey,
@@ -174,6 +218,7 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
             from: invalidBase64,
             callbackDomain: "wiki.kinic.xyz",
+            callbackPath: callbackPath,
             expectedState: "expected-state",
             expectedRequestID: "request-1",
             privateKey: privateKey,
@@ -193,6 +238,7 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
             from: excessiveLifetime,
             callbackDomain: "wiki.kinic.xyz",
+            callbackPath: callbackPath,
             expectedState: "expected-state",
             expectedRequestID: "request-1",
             privateKey: privateKey,
@@ -216,6 +262,7 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
             from: wrongLeaf,
             callbackDomain: "wiki.kinic.xyz",
+            callbackPath: callbackPath,
             expectedState: "expected-state",
             expectedRequestID: "request-1",
             privateKey: privateKey,
@@ -233,6 +280,7 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertThrowsError(try ICInternetIdentityAuthenticator.session(
             from: wrongTarget,
             callbackDomain: "wiki.kinic.xyz",
+            callbackPath: callbackPath,
             expectedState: "expected-state",
             expectedRequestID: "request-1",
             privateKey: privateKey,
@@ -286,9 +334,12 @@ final class ICNativeClientTests: XCTestCase {
         return String(decoding: try! JSONSerialization.data(withJSONObject: response), as: UTF8.self)
     }
 
-    private func makeCallbackURL(fragmentItems: [URLQueryItem]) throws -> URL {
+    private func makeCallbackURL(
+        path: String = "/native-auth-callback",
+        fragmentItems: [URLQueryItem]
+    ) throws -> URL {
         var components = URLComponents(
-            url: URL(string: "https://wiki.kinic.xyz/ios-auth-callback")!,
+            url: URL(string: "https://wiki.kinic.xyz\(path)")!,
             resolvingAgainstBaseURL: false
         )
         var fragment = URLComponents()

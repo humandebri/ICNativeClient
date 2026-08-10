@@ -8,16 +8,17 @@ import UIKit
 
 @available(iOS 17.4, *)
 public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticationPresentationContextProviding {
-    public nonisolated static let callbackPath = "/ios-auth-callback"
     public nonisolated static let defaultAuthorizationTimeout: Duration = .seconds(330)
 
     private let configuration: ICClientConfiguration
     private let callbackDomain: String
+    private let callbackPath: String
     @MainActor private var activeAttempt: AuthorizationAttempt?
 
-    public init(configuration: ICClientConfiguration, callbackDomain: String) {
+    public init(configuration: ICClientConfiguration, callbackDomain: String, callbackPath: String) {
         self.configuration = configuration
         self.callbackDomain = callbackDomain
+        self.callbackPath = callbackPath
     }
 
     @MainActor
@@ -37,10 +38,15 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
         let requestID = UUID().uuidString
         let url = try Self.authorizationURL(
             callbackDomain: callbackDomain,
+            callbackPath: callbackPath,
             configuration: configuration,
             state: state,
             requestID: requestID,
             privateKey: privateKey
+        )
+        let callbackMatcher = try Self.callbackMatcher(
+            callbackDomain: callbackDomain,
+            callbackPath: callbackPath
         )
 
         return try await withTaskCancellationHandler {
@@ -53,7 +59,7 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
                 let attempt = AuthorizationAttempt(continuation: continuation)
                 let session = ASWebAuthenticationSession(
                     url: url,
-                    callback: Self.callbackMatcher(callbackDomain: callbackDomain)
+                    callback: callbackMatcher
                 ) { [weak self, weak attempt] callbackURL, error in
                     Task { @MainActor in
                         guard let self, let attempt else { return }
@@ -69,6 +75,7 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
                             let authSession = try Self.session(
                                 from: callbackURL,
                                 callbackDomain: self.callbackDomain,
+                                callbackPath: self.callbackPath,
                                 expectedState: state,
                                 expectedRequestID: requestID,
                                 privateKey: privateKey,
@@ -110,6 +117,7 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
 
     public static func authorizationURL(
         callbackDomain: String,
+        callbackPath: String,
         configuration: ICClientConfiguration,
         state: String,
         requestID: String,
@@ -141,7 +149,10 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
         var fragment = URLComponents()
         fragment.queryItems = [
             URLQueryItem(name: "message", value: message),
-            URLQueryItem(name: "callback", value: callbackURL(callbackDomain: callbackDomain).absoluteString),
+            URLQueryItem(
+                name: "callback",
+                value: try callbackURL(callbackDomain: callbackDomain, callbackPath: callbackPath).absoluteString
+            ),
             URLQueryItem(name: "state", value: state),
         ]
         guard let encodedFragment = fragment.percentEncodedQuery else {
@@ -160,17 +171,35 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
         return url
     }
 
-    public static func callbackURL(callbackDomain: String) -> URL {
-        URL(string: "https://\(callbackDomain)\(callbackPath)")!
+    public static func callbackURL(callbackDomain: String, callbackPath: String) throws -> URL {
+        guard callbackPath.hasPrefix("/"),
+              !callbackPath.hasPrefix("//"),
+              let url = URL(string: "https://\(callbackDomain)\(callbackPath)"),
+              url.scheme == "https",
+              url.host == callbackDomain,
+              url.port == nil,
+              url.user == nil,
+              url.password == nil,
+              url.path == callbackPath,
+              url.query == nil,
+              url.fragment == nil else {
+            throw ICClientError.invalidPayload
+        }
+        return url
     }
 
-    public static func callbackMatcher(callbackDomain: String) -> ASWebAuthenticationSession.Callback {
-        .https(host: callbackDomain, path: callbackPath)
+    public static func callbackMatcher(
+        callbackDomain: String,
+        callbackPath: String
+    ) throws -> ASWebAuthenticationSession.Callback {
+        _ = try callbackURL(callbackDomain: callbackDomain, callbackPath: callbackPath)
+        return .https(host: callbackDomain, path: callbackPath)
     }
 
     public static func session(
         from callbackURL: URL,
         callbackDomain: String,
+        callbackPath: String,
         expectedState: String,
         expectedRequestID: String,
         privateKey: Curve25519.Signing.PrivateKey,
