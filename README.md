@@ -38,6 +38,11 @@ by default and throws `ICClientError.authorizationTimedOut` when that deadline
 expires. Task cancellation also cancels the active browser session.
 
 ```swift
+let authenticator = ICInternetIdentityAuthenticator(
+    configuration: configuration,
+    callbackDomain: "app.example.com",
+    callbackPath: "/native-auth-callback"
+)
 let session = try await authenticator.authenticate(
     timeout: .seconds(330),
     prefersEphemeralWebBrowserSession: false
