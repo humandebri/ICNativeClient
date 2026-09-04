@@ -6,7 +6,7 @@ let package = Package(
     name: "BindgenPluginFixture",
     platforms: [.macOS(.v13)],
     products: [.library(name: "Fixture", targets: ["Fixture"])],
-    dependencies: [.package(path: "../..")],
+    dependencies: [.package(name: "ICNativeClient", path: "../..")],
     targets: [
         .target(
             name: "Fixture",

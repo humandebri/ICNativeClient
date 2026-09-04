@@ -36,15 +36,24 @@ public final class ICClient: @unchecked Sendable {
         method: String,
         arg: Data = Data(),
         canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
         identity: ICAuthSession? = nil
     ) async throws -> Data {
-        let target = canisterId ?? configuration.canisterId
-        let (response, requestID) = try await performQuery(method: method, arg: arg, canisterId: target, identity: identity)
-        var subnet = try await verifiedSubnet(for: target, identity: identity, forceRefresh: false)
+        let requestText = canisterId ?? configuration.canisterId
+        let effectiveText = effectiveCanisterId ?? requestText
+        // Delegation targets constrain the signed content canister, while certificate ranges constrain routing.
+        let (response, requestID) = try await performQuery(
+            method: method,
+            arg: arg,
+            requestCanisterId: requestText,
+            effectiveCanisterId: effectiveText,
+            identity: identity
+        )
+        var subnet = try await verifiedSubnet(for: effectiveText, identity: identity, forceRefresh: false)
         do {
             try verify(response: response, requestID: requestID, subnet: subnet)
         } catch {
-            subnet = try await verifiedSubnet(for: target, identity: identity, forceRefresh: true)
+            subnet = try await verifiedSubnet(for: effectiveText, identity: identity, forceRefresh: true)
             try verify(response: response, requestID: requestID, subnet: subnet)
         }
         return try response.result()
@@ -55,10 +64,18 @@ public final class ICClient: @unchecked Sendable {
         method: String,
         arg: Data = Data(),
         canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
         identity: ICAuthSession? = nil
     ) async throws -> Data {
-        let target = canisterId ?? configuration.canisterId
-        let (response, _) = try await performQuery(method: method, arg: arg, canisterId: target, identity: identity)
+        let requestText = canisterId ?? configuration.canisterId
+        let effectiveText = effectiveCanisterId ?? requestText
+        let (response, _) = try await performQuery(
+            method: method,
+            arg: arg,
+            requestCanisterId: requestText,
+            effectiveCanisterId: effectiveText,
+            identity: identity
+        )
         return try response.result()
     }
 
@@ -67,10 +84,17 @@ public final class ICClient: @unchecked Sendable {
         method: String,
         arguments: CandidArguments = CandidArguments(),
         canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
         identity: ICAuthSession? = nil
     ) async throws -> CandidReply {
         let bytes = try arguments.encode()
-        let reply = try await queryRaw(method: method, arg: bytes, canisterId: canisterId, identity: identity)
+        let reply = try await queryRaw(
+            method: method,
+            arg: bytes,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            identity: identity
+        )
         return try CandidDecoder().decode(reply)
     }
 
@@ -78,6 +102,7 @@ public final class ICClient: @unchecked Sendable {
         method: String,
         arguments: CandidArguments = CandidArguments(),
         canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
         identity: ICAuthSession? = nil,
         as outputType: Output.Type = Output.self
     ) async throws -> Output {
@@ -85,6 +110,7 @@ public final class ICClient: @unchecked Sendable {
             method: method,
             arguments: arguments,
             canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
             identity: identity
         )
         guard reply.values.count == 1 else {
@@ -97,6 +123,7 @@ public final class ICClient: @unchecked Sendable {
         method: String,
         argument: Input,
         canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
         identity: ICAuthSession? = nil,
         as outputType: Output.Type = Output.self
     ) async throws -> Output {
@@ -104,6 +131,7 @@ public final class ICClient: @unchecked Sendable {
             method: method,
             arguments: CandidArguments(argument),
             canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
             identity: identity,
             as: outputType
         )
@@ -303,15 +331,18 @@ public final class ICClient: @unchecked Sendable {
     private func performQuery(
         method: String,
         arg: Data,
-        canisterId: String,
+        requestCanisterId: String,
+        effectiveCanisterId: String,
         identity: ICAuthSession?
     ) async throws -> (ICQueryResponse, Data) {
-        guard let canister = ICPrincipal.parse(canisterId), !method.isEmpty else {
+        guard let canister = ICPrincipal.parse(requestCanisterId),
+              ICPrincipal.parse(effectiveCanisterId) != nil,
+              !method.isEmpty else {
             throw ICClientError.invalidCanisterId
         }
         let content: ICCBOR.Value
         if let identity {
-            try validateIdentityForRequest(identity, requestCanisterId: canisterId, permission: .query)
+            try validateIdentityForRequest(identity, requestCanisterId: requestCanisterId, permission: .query)
             content = requestContent(type: "query", canister: canister, method: method, arg: arg, identity: identity)
         } else {
             content = anonymousRequestContent(type: "query", canister: canister, method: method, arg: arg)
@@ -319,7 +350,7 @@ public final class ICClient: @unchecked Sendable {
         let envelope = try envelope(content: content, identity: identity)
         let (data, response) = try await postCBOR(
             envelope,
-            to: apiURL(for: "query", canisterId: canisterId),
+            to: apiURL(for: "query", canisterId: effectiveCanisterId),
             operation: "query \(method)"
         )
         guard response.statusCode == 200 else {

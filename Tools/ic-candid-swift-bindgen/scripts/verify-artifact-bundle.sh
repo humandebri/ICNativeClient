@@ -54,9 +54,9 @@ verify_binary() {
 
 verify_binary \
   arm64 \
-  "$bundle/ic-candid-swift-bindgen-0.1.0-macos-arm64/bin/ic-candid-swift-bindgen"
+  "$bundle/ic-candid-swift-bindgen-0.1.1-macos-arm64/bin/ic-candid-swift-bindgen"
 verify_binary \
   x86_64 \
-  "$bundle/ic-candid-swift-bindgen-0.1.0-macos-x86_64/bin/ic-candid-swift-bindgen"
+  "$bundle/ic-candid-swift-bindgen-0.1.1-macos-x86_64/bin/ic-candid-swift-bindgen"
 
 printf '%s\n' "artifact bundle matches ic-candid-swift-bindgen $actual_version ($source_hash)"

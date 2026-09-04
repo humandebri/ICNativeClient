@@ -24,6 +24,25 @@ jobs:
         run: Tools/ic-candid-swift-bindgen/scripts/test-artifact-verification.sh
       - name: Build tool plugin fixture
         run: swift test --package-path Tests/BindgenPluginFixture -Xswiftc -swift-version -Xswiftc 6 -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
+      - name: Build tool plugin fixture from renamed checkout
+        run: |
+          temporary="$(mktemp -d "${RUNNER_TEMP}/ic-bindgen-renamed.XXXXXX")"
+          trap 'rm -rf "$temporary"' EXIT
+          git clone --no-hardlinks "$GITHUB_WORKSPACE" "$temporary/renamed-checkout"
+          swift test \
+            --package-path "$temporary/renamed-checkout/Tests/BindgenPluginFixture" \
+            -Xswiftc -swift-version \
+            -Xswiftc 6 \
+            -Xswiftc -strict-concurrency=complete \
+            -Xswiftc -warnings-as-errors
+      - name: Build Xcode project plugin fixture
+        run: |
+          xcodebuild build \
+            -project Tests/BindgenXcodePluginFixture/BindgenXcodePluginFixture.xcodeproj \
+            -scheme FixtureApp \
+            -destination 'generic/platform=iOS Simulator' \
+            -skipPackagePluginValidation \
+            CODE_SIGNING_ALLOWED=NO
 
   test:
     runs-on: macos-26

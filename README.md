@@ -1,6 +1,6 @@
 # ICNativeClient
 
-ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.0 adds build-time Candid-to-Swift bindings and P-256 Internet Identity delegation verification.
+ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.1 adds effective routing IDs to verified queries and supports binding generation directly from Xcode project targets.
 
 It includes principal/account helpers, a Candid DIDL codec, explicit Swift model conversion, and raw Candid-byte transport.
 
@@ -14,7 +14,7 @@ Add the repository as a Swift Package dependency and link the `ICNativeClient` p
 
 ## Candid Swift bindings
 
-`ic-candid-swift-bindgen` 0.1.0 generates typed `CandidConvertible` models and canister clients from checked-in Candid interfaces. The generator uses the Candid parser for the schema and the existing ICNativeClient runtime for DIDL encoding, decoding, verified queries, updates, and authentication.
+`ic-candid-swift-bindgen` 0.1.1 generates typed `CandidConvertible` models and canister clients from checked-in Candid interfaces. The generator uses the Candid parser for the schema and the existing ICNativeClient runtime for DIDL encoding, decoding, verified queries, updates, and authentication.
 
 Add `ICNativeClientBindgenPlugin` to the application target that owns the bindings:
 
@@ -30,7 +30,9 @@ Add `ICNativeClientBindgenPlugin` to the application target that owns the bindin
 )
 ```
 
-Place exactly one manifest at a path ending in `Candid/bindings.toml` inside the consuming package. DID paths are relative to the package root:
+For an Xcode project target, add the package dependency to the project, then add `ICNativeClientBindgenPlugin` under the target's **Build Phases > Run Build Tool Plug-ins** section.
+
+Place exactly one manifest at a path ending in `Candid/bindings.toml` inside the consuming package or Xcode project. DID paths are relative to that package or project root:
 
 ```toml
 [[canister]]
@@ -40,7 +42,7 @@ canister_id = "ryjl3-tyaaa-aaaaa-aaaba-cai"
 methods = ["account_balance", "transfer"]
 ```
 
-The plugin writes `ICNativeClientCandidBindings.swift` only to SwiftPM's plugin work directory, which Xcode treats as Derived Sources. Generated Swift is not added to the consumer repository. A missing manifest, multiple manifests, an unknown key or method, an invalid canister ID, a path outside the package, or an unsupported Candid type fails the build.
+The plugin writes `ICNativeClientCandidBindings.swift` only to its plugin work directory, which Xcode treats as Derived Sources. Generated Swift is not added to the consumer repository. A missing manifest, multiple manifests, an unknown key or method, an invalid canister ID, a path outside the package or project, or an unsupported Candid type fails the build.
 
 The CLI can also be built and run directly:
 
@@ -54,7 +56,7 @@ cargo run --release \
 
 Use `ic-candid-swift-bindgen --build-info` to print the CLI version and the SHA-256 of the Rust source, Cargo files, and artifact build script embedded at compile time. Maintainers can run `Tools/ic-candid-swift-bindgen/scripts/verify-artifact-bundle.sh` to confirm that both bundled macOS architectures carry the current build information and generate byte-identical fixture output.
 
-Version 0.1.0 supports booleans, fixed-width integers, arbitrary-precision `nat` and `int`, text, blobs, principals, optionals, vectors, records, variants, positional multi-value method boundaries, numeric field IDs, and self-recursive named records and variants. It intentionally rejects floats, `reserved`, `empty`, function/service values, one-way methods, recursive aliases, and mutually recursive type groups. Query and composite-query methods use the verified query path; update methods require an `ICAuthSession` and expose the optional effective routing canister ID needed for management-canister calls.
+Version 0.1.1 supports booleans, fixed-width integers, arbitrary-precision `nat` and `int`, text, blobs, principals, optionals, vectors, records, variants, positional multi-value method boundaries, numeric field IDs, and self-recursive named records and variants. It intentionally rejects floats, `reserved`, `empty`, function/service values, one-way methods, recursive aliases, and mutually recursive type groups. Query and composite-query wrappers use the verified query path and expose an optional effective routing canister ID; update methods require an `ICAuthSession` and expose the same routing option.
 
 ## Trust and verification model
 
@@ -172,6 +174,18 @@ let updateReply = try await client.callRaw(
 )
 ```
 
+Management-canister queries keep `aaaaa-aa` in the signed request content while routing to the subnet that hosts the target canister:
+
+```swift
+let status = try await client.queryCandid(
+    method: "canister_status",
+    arguments: statusArguments,
+    canisterId: "aaaaa-aa",
+    effectiveCanisterId: bucketCanisterID,
+    identity: identity
+)
+```
+
 Certified subnet/node keys are cached for one hour. Consecutive queries routed to the same certified subnet reuse the cache and do not perform an additional `read_state`. A missing node key or invalid node signature causes exactly one forced refresh before failure. The included benchmark test currently measures 100 local BLS verifications, so performance regressions remain visible without weakening verification.
 
 Rejects are exposed as `ICClientError.rejected(ICReject)`, including reject code, message, optional error code, and whether the rejection was certified. A certified `done` status is reported as `requestDoneWithoutReply` rather than as an empty reply.
@@ -273,6 +287,10 @@ let sharedStore = ICIdentityStore(
 ```
 
 Every participating target must include that access group in its Keychain Sharing entitlement. ICNativeClient does not migrate items between access groups or from application-specific storage formats. If the shared item is initially absent, authenticate and save the session from the main application before an extension attempts to load it. An invalid access group or missing entitlement is reported as `ICClientError.keychainFailure`.
+
+## New in 0.7.1
+
+0.7.1 is a backward-compatible patch release. Verified and unsafe query APIs now separate the signed request canister ID from the effective routing ID required by management-canister queries. Bindgen 0.1.1 forwards that routing ID from generated query wrappers, and the build tool plugin can run directly on Xcode project targets.
 
 ## New in 0.7.0
 

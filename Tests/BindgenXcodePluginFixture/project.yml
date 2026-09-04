@@ -1,0 +1,26 @@
+name: BindgenXcodePluginFixture
+options:
+  bundleIdPrefix: com.example
+packages:
+  ICNativeClient:
+    path: ../..
+targets:
+  FixtureApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - Sources
+    dependencies:
+      - package: ICNativeClient
+        product: ICNativeClient
+    buildToolPlugins:
+      - plugin: ICNativeClientBindgenPlugin
+        package: ICNativeClient
+    settings:
+      base:
+        CODE_SIGNING_ALLOWED: NO
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+        SWIFT_VERSION: 6.0
