@@ -402,7 +402,7 @@ extension CandidPrincipal: CandidConvertible {
 }
 
 private protocol CandidFixedInteger: FixedWidthInteger, CandidConvertible {
-    static var makeValue: (Self) -> CandidValue { get }
+    static func makeValue(_ value: Self) -> CandidValue
     static func extract(_ value: CandidValue) -> Self?
 }
 
@@ -416,14 +416,14 @@ extension CandidFixedInteger {
     public var candidValue: CandidValue { Self.makeValue(self) }
 }
 
-extension UInt8: CandidFixedInteger { public static let candidType: CandidType = .nat8; fileprivate static let makeValue: (UInt8) -> CandidValue = CandidValue.nat8; fileprivate static func extract(_ v: CandidValue) -> UInt8? { if case .nat8(let x) = v { x } else { nil } } }
-extension UInt16: CandidFixedInteger { public static let candidType: CandidType = .nat16; fileprivate static let makeValue: (UInt16) -> CandidValue = CandidValue.nat16; fileprivate static func extract(_ v: CandidValue) -> UInt16? { if case .nat16(let x) = v { x } else { nil } } }
-extension UInt32: CandidFixedInteger { public static let candidType: CandidType = .nat32; fileprivate static let makeValue: (UInt32) -> CandidValue = CandidValue.nat32; fileprivate static func extract(_ v: CandidValue) -> UInt32? { if case .nat32(let x) = v { x } else { nil } } }
-extension UInt64: CandidFixedInteger { public static let candidType: CandidType = .nat64; fileprivate static let makeValue: (UInt64) -> CandidValue = CandidValue.nat64; fileprivate static func extract(_ v: CandidValue) -> UInt64? { if case .nat64(let x) = v { x } else { nil } } }
-extension Int8: CandidFixedInteger { public static let candidType: CandidType = .int8; fileprivate static let makeValue: (Int8) -> CandidValue = CandidValue.int8; fileprivate static func extract(_ v: CandidValue) -> Int8? { if case .int8(let x) = v { x } else { nil } } }
-extension Int16: CandidFixedInteger { public static let candidType: CandidType = .int16; fileprivate static let makeValue: (Int16) -> CandidValue = CandidValue.int16; fileprivate static func extract(_ v: CandidValue) -> Int16? { if case .int16(let x) = v { x } else { nil } } }
-extension Int32: CandidFixedInteger { public static let candidType: CandidType = .int32; fileprivate static let makeValue: (Int32) -> CandidValue = CandidValue.int32; fileprivate static func extract(_ v: CandidValue) -> Int32? { if case .int32(let x) = v { x } else { nil } } }
-extension Int64: CandidFixedInteger { public static let candidType: CandidType = .int64; fileprivate static let makeValue: (Int64) -> CandidValue = CandidValue.int64; fileprivate static func extract(_ v: CandidValue) -> Int64? { if case .int64(let x) = v { x } else { nil } } }
+extension UInt8: CandidFixedInteger { public static let candidType: CandidType = .nat8; fileprivate static func makeValue(_ value: UInt8) -> CandidValue { .nat8(value) }; fileprivate static func extract(_ v: CandidValue) -> UInt8? { if case .nat8(let x) = v { x } else { nil } } }
+extension UInt16: CandidFixedInteger { public static let candidType: CandidType = .nat16; fileprivate static func makeValue(_ value: UInt16) -> CandidValue { .nat16(value) }; fileprivate static func extract(_ v: CandidValue) -> UInt16? { if case .nat16(let x) = v { x } else { nil } } }
+extension UInt32: CandidFixedInteger { public static let candidType: CandidType = .nat32; fileprivate static func makeValue(_ value: UInt32) -> CandidValue { .nat32(value) }; fileprivate static func extract(_ v: CandidValue) -> UInt32? { if case .nat32(let x) = v { x } else { nil } } }
+extension UInt64: CandidFixedInteger { public static let candidType: CandidType = .nat64; fileprivate static func makeValue(_ value: UInt64) -> CandidValue { .nat64(value) }; fileprivate static func extract(_ v: CandidValue) -> UInt64? { if case .nat64(let x) = v { x } else { nil } } }
+extension Int8: CandidFixedInteger { public static let candidType: CandidType = .int8; fileprivate static func makeValue(_ value: Int8) -> CandidValue { .int8(value) }; fileprivate static func extract(_ v: CandidValue) -> Int8? { if case .int8(let x) = v { x } else { nil } } }
+extension Int16: CandidFixedInteger { public static let candidType: CandidType = .int16; fileprivate static func makeValue(_ value: Int16) -> CandidValue { .int16(value) }; fileprivate static func extract(_ v: CandidValue) -> Int16? { if case .int16(let x) = v { x } else { nil } } }
+extension Int32: CandidFixedInteger { public static let candidType: CandidType = .int32; fileprivate static func makeValue(_ value: Int32) -> CandidValue { .int32(value) }; fileprivate static func extract(_ v: CandidValue) -> Int32? { if case .int32(let x) = v { x } else { nil } } }
+extension Int64: CandidFixedInteger { public static let candidType: CandidType = .int64; fileprivate static func makeValue(_ value: Int64) -> CandidValue { .int64(value) }; fileprivate static func extract(_ v: CandidValue) -> Int64? { if case .int64(let x) = v { x } else { nil } } }
 
 extension UInt: CandidConvertible {
     public static let candidType: CandidType = .nat64
