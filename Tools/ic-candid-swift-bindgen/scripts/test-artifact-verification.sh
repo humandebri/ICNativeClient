@@ -14,7 +14,7 @@ mkdir -p "$fake_source_directory"
 printf '%s\n' \
   '#!/bin/sh' \
   'if [ "${1:-}" = "--build-info" ]; then' \
-  '  printf "%s\n" "version=0.1.1" "source_hash=0000000000000000000000000000000000000000000000000000000000000000"' \
+  '  printf "%s\n" "version=0.1.2" "source_hash=0000000000000000000000000000000000000000000000000000000000000000"' \
   'else' \
   '  exec "$IC_BINDGEN_REAL_SOURCE_BINARY" "$@"' \
   'fi' > "$fake_source_binary"

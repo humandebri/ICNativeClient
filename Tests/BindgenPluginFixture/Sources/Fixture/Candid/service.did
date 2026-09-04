@@ -17,10 +17,16 @@ type Chain = variant {
   next : opt Chain;
 };
 
+type RecursiveRecord = record {
+  value : text;
+  next : opt RecursiveRecord;
+};
+
 service : {
   lookup : (nat64) -> (opt Entry) query;
   store : (Entry) -> (variant { ok; err : text });
   echo_chain : (Chain) -> (Chain) query;
+  recursive_record : (RecursiveRecord) -> (RecursiveRecord) query;
   containers : (Containers) -> (Containers) query;
   client : () -> () query;
   canister_id : (ReservedNames) -> (ReservedNames) query;

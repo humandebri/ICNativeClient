@@ -28,6 +28,8 @@ fn generates_selected_typed_bindings_deterministically() {
     assert!(first.contains("public let field7: String"));
     assert!(first.contains("enum _ICBindgenSupport"));
     assert!(first.contains("LedgerCanister._ICBindgenSupport.decode"));
+    assert!(first.contains("declared type is not compatible"));
+    assert!(first.contains("private static func project("));
     assert!(!first.contains("\nfunc _icBindgenDecode"));
     assert!(!first.contains("func ignored("));
 }

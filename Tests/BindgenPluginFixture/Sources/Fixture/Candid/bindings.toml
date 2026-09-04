@@ -8,4 +8,4 @@ methods = ["lookup"]
 name = "Fixture"
 did = "Sources/Fixture/Candid/service.did"
 canister_id = "aaaaa-aa"
-methods = ["lookup", "store", "echo_chain", "containers", "client", "canister_id", "control\u000Bmethod"]
+methods = ["lookup", "store", "echo_chain", "recursive_record", "containers", "client", "canister_id", "control\u000Bmethod"]

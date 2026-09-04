@@ -1,6 +1,6 @@
 # ICNativeClient
 
-ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.2 accepts valid indefinite-length CBOR responses while retaining strict validation limits.
+ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.3 accepts Candid-compatible reply subtype evolution in generated Swift bindings.
 
 It includes principal/account helpers, a Candid DIDL codec, explicit Swift model conversion, and raw Candid-byte transport.
 
@@ -14,7 +14,7 @@ Add the repository as a Swift Package dependency and link the `ICNativeClient` p
 
 ## Candid Swift bindings
 
-`ic-candid-swift-bindgen` 0.1.1 generates typed `CandidConvertible` models and canister clients from checked-in Candid interfaces. The generator uses the Candid parser for the schema and the existing ICNativeClient runtime for DIDL encoding, decoding, verified queries, updates, and authentication.
+`ic-candid-swift-bindgen` 0.1.2 generates typed `CandidConvertible` models and canister clients from checked-in Candid interfaces. The generator uses the Candid parser for the schema and the existing ICNativeClient runtime for DIDL encoding, decoding, verified queries, updates, and authentication.
 
 Add `ICNativeClientBindgenPlugin` to the application target that owns the bindings:
 
@@ -56,7 +56,7 @@ cargo run --release \
 
 Use `ic-candid-swift-bindgen --build-info` to print the CLI version and the SHA-256 of the Rust source, Cargo files, and artifact build script embedded at compile time. Maintainers can run `Tools/ic-candid-swift-bindgen/scripts/verify-artifact-bundle.sh` to confirm that both bundled macOS architectures carry the current build information and generate byte-identical fixture output.
 
-Version 0.1.1 supports booleans, fixed-width integers, arbitrary-precision `nat` and `int`, text, blobs, principals, optionals, vectors, records, variants, positional multi-value method boundaries, numeric field IDs, and self-recursive named records and variants. It intentionally rejects floats, `reserved`, `empty`, function/service values, one-way methods, recursive aliases, and mutually recursive type groups. Query and composite-query wrappers use the verified query path and expose an optional effective routing canister ID; update methods require an `ICAuthSession` and expose the same routing option.
+Version 0.1.2 supports booleans, fixed-width integers, arbitrary-precision `nat` and `int`, text, blobs, principals, optionals, vectors, records, variants, positional multi-value method boundaries, numeric field IDs, and self-recursive named records and variants. Reply decoding accepts Candid-compatible record extensions and recursively compatible optional, vector, numeric, and recursive values. Variants remain strict: added or unknown cases and changed payload declarations are rejected. The generator intentionally rejects floats, `reserved`, `empty`, function/service values, one-way methods, recursive aliases, and mutually recursive type groups. Query and composite-query wrappers use the verified query path and expose an optional effective routing canister ID; update methods require an `ICAuthSession` and expose the same routing option.
 
 ## Trust and verification model
 
