@@ -713,6 +713,69 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertNil(try store.load())
     }
 
+    func testIdentityStoreUsesAccessGroupForEveryKeychainOperation() throws {
+        let config = try configuration(root: BLSTKey(seed: 28).derPublicKey)
+        let session = try makeAuthSession(config: config)
+        let accessGroup = "TEAMID.com.example.shared"
+        let keychain = MockKeychain(data: nil)
+        let store = ICIdentityStore(
+            configuration: config,
+            service: "shared-service",
+            account: "shared-account",
+            accessGroup: accessGroup,
+            keychain: keychain
+        )
+
+        XCTAssertNil(try store.load())
+        try store.save(session)
+        try store.clear()
+
+        let queries = keychain.copyQueries + keychain.updateQueries + keychain.addQueries + keychain.deleteQueries
+        XCTAssertFalse(queries.isEmpty)
+        for query in queries {
+            XCTAssertEqual(query[kSecAttrAccessGroup as String] as? String, accessGroup)
+        }
+
+        let retryKeychain = MockKeychain(data: nil)
+        retryKeychain.updateStatuses = [errSecItemNotFound, errSecSuccess]
+        retryKeychain.addStatus = errSecDuplicateItem
+        let retryStore = ICIdentityStore(
+            configuration: config,
+            service: "shared-service",
+            account: "shared-account",
+            accessGroup: accessGroup,
+            keychain: retryKeychain
+        )
+        try retryStore.save(session)
+        XCTAssertEqual(retryKeychain.updateQueries.count, 2)
+        XCTAssertEqual(retryKeychain.addQueries.count, 1)
+        for query in retryKeychain.updateQueries + retryKeychain.addQueries {
+            XCTAssertEqual(query[kSecAttrAccessGroup as String] as? String, accessGroup)
+        }
+    }
+
+    func testIdentityStoreOmitsAccessGroupWhenUnspecified() throws {
+        let config = try configuration(root: BLSTKey(seed: 29).derPublicKey)
+        let session = try makeAuthSession(config: config)
+        let keychain = MockKeychain(data: nil)
+        let store = ICIdentityStore(
+            configuration: config,
+            service: "private-service",
+            account: "private-account",
+            keychain: keychain
+        )
+
+        XCTAssertNil(try store.load())
+        try store.save(session)
+        try store.clear()
+
+        let queries = keychain.copyQueries + keychain.updateQueries + keychain.addQueries + keychain.deleteQueries
+        XCTAssertFalse(queries.isEmpty)
+        for query in queries {
+            XCTAssertNil(query[kSecAttrAccessGroup as String])
+        }
+    }
+
     func testBLSVerificationPerformanceIsMeasured() throws {
         let key = BLSTKey(seed: 17)
         let message = Data("benchmark".utf8)
@@ -1210,25 +1273,45 @@ private final class URLProtocolStub: URLProtocol, @unchecked Sendable {
 private final class MockKeychain: ICKeychainAccess, @unchecked Sendable {
     var data: Data?
     var updateStatus: OSStatus = errSecSuccess
+    var updateStatuses: [OSStatus] = []
+    var addStatus: OSStatus?
     var copyStatus: OSStatus = errSecSuccess
+    var copyQueries: [[String: Any]] = []
+    var updateQueries: [[String: Any]] = []
+    var addQueries: [[String: Any]] = []
+    var deleteQueries: [[String: Any]] = []
     init(data: Data?) { self.data = data }
     func copyMatching(_ query: CFDictionary, result: UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus {
+        copyQueries.append(query as? [String: Any] ?? [:])
         guard copyStatus == errSecSuccess else { return copyStatus }
         result?.pointee = data as CFData?
         return data == nil ? errSecItemNotFound : errSecSuccess
     }
     func update(_ query: CFDictionary, attributes: CFDictionary) -> OSStatus {
+        updateQueries.append(query as? [String: Any] ?? [:])
+        if !updateStatuses.isEmpty {
+            let status = updateStatuses.removeFirst()
+            guard status == errSecSuccess else { return status }
+            if let value = attributes as? [String: Any], let newData = value[kSecValueData as String] as? Data { data = newData }
+            return errSecSuccess
+        }
         guard updateStatus == errSecSuccess else { return updateStatus }
         guard data != nil else { return errSecItemNotFound }
         if let value = attributes as? [String: Any], let newData = value[kSecValueData as String] as? Data { data = newData }
         return errSecSuccess
     }
     func add(_ attributes: CFDictionary) -> OSStatus {
+        addQueries.append(attributes as? [String: Any] ?? [:])
+        if let addStatus { return addStatus }
         if data != nil { return errSecDuplicateItem }
         if let value = attributes as? [String: Any] { data = value[kSecValueData as String] as? Data }
         return errSecSuccess
     }
-    func delete(_ query: CFDictionary) -> OSStatus { data = nil; return errSecSuccess }
+    func delete(_ query: CFDictionary) -> OSStatus {
+        deleteQueries.append(query as? [String: Any] ?? [:])
+        data = nil
+        return errSecSuccess
+    }
 }
 
 private func response(_ request: URLRequest, status: Int, body: Data) -> (HTTPURLResponse, Data) {

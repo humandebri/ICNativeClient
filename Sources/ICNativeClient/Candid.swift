@@ -173,6 +173,20 @@ public protocol CandidConvertible: Sendable {
     var candidValue: CandidValue { get }
 }
 
+public struct CandidNull: CandidConvertible, Equatable, Hashable, Sendable {
+    public static let candidType: CandidType = .null
+
+    public init() {}
+
+    public init(candidValue: CandidValue) throws {
+        guard case .null = candidValue else {
+            throw ICClientError.invalidCandid("expected null")
+        }
+    }
+
+    public var candidValue: CandidValue { .null }
+}
+
 public struct CandidRecord: Sendable {
     public let fields: [UInt32: CandidValue]
 

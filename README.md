@@ -105,6 +105,8 @@ struct User: CandidConvertible {
 
 `CandidNat` and `CandidInt` retain canonical decimal strings for arbitrary-precision values. `CandidPrincipal` validates principal text. Variants use `CandidVariant` with the complete declared case list, selected tag, and payload.
 
+Use `CandidNull()` for a typed Candid `null`, including payload-free variant cases such as `variant { ok; err : text }`. It is distinct from an empty Candid record.
+
 `Data` and `[UInt8]` both map to Candid `vec nat8`. Recursive wire types are retained with `CandidType.recursive` and `CandidType.reference`; finite values can be decoded and re-encoded, while the configured nesting limit still rejects excessively deep values.
 
 Use `queryRaw` and `callRaw` when integrating generated bindings or Candid types not represented by this value API. `unsafeQueryRaw` remains the explicit unverified opt-out; there is intentionally no typed unsafe wrapper.
@@ -184,6 +186,18 @@ let restored = try store.load() // nil only when no item is registered
 ```
 
 Saving updates an existing item first and adds only when absent, so an update failure does not delete the prior session. Keychain failures and malformed legacy data are thrown without deleting stored bytes; only an absent item returns `nil`.
+
+To share the session between an application and its extensions, configure the same Keychain access group, service, and account in every target:
+
+```swift
+let sharedStore = ICIdentityStore(
+    configuration: configuration,
+    service: "com.example.app.ic",
+    accessGroup: "TEAMID.com.example.shared"
+)
+```
+
+Every participating target must include that access group in its Keychain Sharing entitlement. ICNativeClient does not migrate items between access groups or from application-specific storage formats. If the shared item is initially absent, authenticate and save the session from the main application before an extension attempts to load it. An invalid access group or missing entitlement is reported as `ICClientError.keychainFailure`.
 
 ## New in 0.5.0
 

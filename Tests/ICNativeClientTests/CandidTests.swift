@@ -18,6 +18,35 @@ final class CandidTests: XCTestCase {
         XCTAssertEqual(Candid.fieldID("name"), 1_224_700_491)
     }
 
+    func testCandidNullConvertibleAndVariantPayload() throws {
+        let null = CandidNull()
+        try assertFixture(
+            "4449444c00017f",
+            values: [try CandidTypedValue(null)]
+        )
+
+        let reply = try CandidDecoder().decode(CandidArguments(null).encode())
+        XCTAssertEqual(try reply.decode(CandidNull.self), null)
+        XCTAssertThrowsError(try CandidNull(candidValue: .bool(false))) { error in
+            XCTAssertEqual(error as? ICClientError, .invalidCandid("expected null"))
+        }
+
+        let fields = [
+            CandidField("ok", type: .null),
+            CandidField("err", type: .text),
+        ]
+        let value = try CandidTypedValue(
+            type: .variant(fields),
+            value: .variant(try CandidVariant(fields: fields, tag: "ok", value: .null))
+        )
+        let variantReply = try CandidDecoder().decode(CandidArguments([value]).encode())
+        guard case .variant(let variant) = variantReply.values.first?.value else {
+            return XCTFail("expected a variant")
+        }
+        XCTAssertEqual(variant.tag, Candid.fieldID("ok"))
+        XCTAssertEqual(variant.value, .null)
+    }
+
     func testDidcPrimitiveArbitraryIntegerBlobAndEmptyCompositeFixtures() throws {
         try assertFixture(
             "4449444c00047c7c7c7cff00800140bf7f",

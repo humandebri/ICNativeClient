@@ -4,6 +4,11 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Optional Keychain access-group selection for sharing `ICIdentityStore` sessions between an application and its extensions.
+- `CandidNull`, a typed `CandidConvertible` representation of the Candid `null` value.
+
 ## [0.5.0] - 2026-09-04
 
 ### Added
