@@ -187,7 +187,9 @@ public enum ICCBOR {
             let first = try readByte()
             let major = first >> 5
             let info = first & 0x1f
-            guard info != 31 else { throw ICClientError.invalidCBOR("indefinite-length values are unsupported") }
+            if info == 31 {
+                return try readIndefinite(major: major, depth: depth)
+            }
             let count = try readCount(info)
             switch major {
             case 0: return .unsigned(count)
@@ -207,13 +209,11 @@ public enum ICCBOR {
                 let size = try checkedCollectionCount(count)
                 var values: [(Value, Value)] = []
                 values.reserveCapacity(size)
-                var encodedKeys = Set<Data>()
-                encodedKeys.reserveCapacity(size)
+                var canonicalKeys = Set<Data>()
+                canonicalKeys.reserveCapacity(size)
                 for _ in 0..<size {
-                    let keyStart = index
                     let key = try read(depth: depth + 1)
-                    let encodedKey = data.subdata(in: keyStart..<index)
-                    guard encodedKeys.insert(encodedKey).inserted else {
+                    guard canonicalKeys.insert(ICCBOR.encode(key)).inserted else {
                         throw ICClientError.invalidCBOR("duplicate map key")
                     }
                     values.append((key, try read(depth: depth + 1)))
@@ -225,6 +225,76 @@ public enum ICCBOR {
             default:
                 throw ICClientError.invalidCBOR("unsupported CBOR major type \(major)")
             }
+        }
+
+        private mutating func readIndefinite(major: UInt8, depth: Int) throws -> Value {
+            switch major {
+            case 2:
+                return .bytes(try readIndefiniteStringChunks(major: major))
+            case 3:
+                let bytes = try readIndefiniteStringChunks(major: major)
+                guard let text = String(data: bytes, encoding: .utf8) else {
+                    throw ICClientError.invalidCBOR("invalid UTF-8")
+                }
+                return .text(text)
+            case 4:
+                var values: [Value] = []
+                while !consumeBreakIfPresent() {
+                    guard values.count < maximumCollectionCount else {
+                        throw ICClientError.invalidCBOR("collection limit exceeded")
+                    }
+                    values.append(try read(depth: depth + 1))
+                }
+                return .array(values)
+            case 5:
+                var values: [(Value, Value)] = []
+                var canonicalKeys = Set<Data>()
+                while !consumeBreakIfPresent() {
+                    guard values.count < maximumCollectionCount else {
+                        throw ICClientError.invalidCBOR("collection limit exceeded")
+                    }
+                    let key = try read(depth: depth + 1)
+                    guard canonicalKeys.insert(ICCBOR.encode(key)).inserted else {
+                        throw ICClientError.invalidCBOR("duplicate map key")
+                    }
+                    values.append((key, try read(depth: depth + 1)))
+                }
+                return .map(values)
+            default:
+                throw ICClientError.invalidCBOR("indefinite-length value has an unsupported major type \(major)")
+            }
+        }
+
+        private mutating func readIndefiniteStringChunks(major: UInt8) throws -> Data {
+            var bytes = Data()
+            var chunkCount = 0
+            while !consumeBreakIfPresent() {
+                guard chunkCount < maximumCollectionCount else {
+                    throw ICClientError.invalidCBOR("collection limit exceeded")
+                }
+                let first = try readByte()
+                let chunkMajor = first >> 5
+                let info = first & 0x1f
+                guard chunkMajor == major, info != 31 else {
+                    throw ICClientError.invalidCBOR("invalid indefinite-length string chunk")
+                }
+                let chunk = try readData(readCount(info))
+                if major == 3, String(data: chunk, encoding: .utf8) == nil {
+                    throw ICClientError.invalidCBOR("invalid UTF-8")
+                }
+                bytes.append(chunk)
+                chunkCount += 1
+            }
+            return bytes
+        }
+
+        private mutating func consumeBreakIfPresent() -> Bool {
+            guard index < data.count,
+                  data[data.index(data.startIndex, offsetBy: index)] == 0xff else {
+                return false
+            }
+            index += 1
+            return true
         }
 
         private mutating func readCount(_ info: UInt8) throws -> UInt64 {

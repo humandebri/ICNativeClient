@@ -98,13 +98,46 @@ final class ICNativeClientTests: XCTestCase {
         }
         XCTAssertThrowsError(try ICCBOR.decodeStrict(Data([0x01, 0x01])))
         XCTAssertThrowsError(try ICCBOR.decodeStrict(Data([0xa2, 0x61, 0x61, 0x01, 0x61, 0x61, 0x02])))
-        XCTAssertThrowsError(try ICCBOR.decodeStrict(Data([0x9f, 0xff])))
         XCTAssertThrowsError(try ICCBOR.decodeStrict(Data([0xd8, 0x01, 0x01])))
 
         var deep: ICCBOR.Value = .unsigned(1)
         for _ in 0..<65 { deep = .array([deep]) }
         XCTAssertThrowsError(try ICCBOR.decodeStrict(ICCBOR.encode(deep)))
         XCTAssertThrowsError(try ICCBOR.decodeStrict(Data([0x9a, 0x00, 0x01, 0x86, 0xa1])))
+    }
+
+    func testCBORDecodesIndefiniteLengthValues() throws {
+        XCTAssertEqual(
+            try ICCBOR.decodeStrict(Data([0x5f, 0x42, 0x01, 0x02, 0x43, 0x03, 0x04, 0x05, 0xff])),
+            .bytes(Data([0x01, 0x02, 0x03, 0x04, 0x05]))
+        )
+        XCTAssertEqual(
+            try ICCBOR.decodeStrict(Data([0x7f, 0x62, 0x68, 0x65, 0x63, 0x6c, 0x6c, 0x6f, 0xff])),
+            .text("hello")
+        )
+        XCTAssertEqual(
+            try ICCBOR.decodeStrict(Data([0x9f, 0x01, 0x82, 0x02, 0x03, 0xff])),
+            .array([.unsigned(1), .array([.unsigned(2), .unsigned(3)])])
+        )
+        XCTAssertEqual(
+            try ICCBOR.decodeStrict(Data([0xbf, 0x61, 0x61, 0x01, 0x61, 0x62, 0x9f, 0x02, 0xff, 0xff])),
+            .map([(.text("a"), .unsigned(1)), (.text("b"), .array([.unsigned(2)]))])
+        )
+    }
+
+    func testCBORRejectsMalformedIndefiniteLengthValues() throws {
+        XCTAssertThrowsError(try ICCBOR.decodeStrict(Data([0xff])))
+        XCTAssertThrowsError(try ICCBOR.decodeStrict(Data([0x9f, 0x01])))
+        XCTAssertThrowsError(try ICCBOR.decodeStrict(Data([0x5f, 0x61, 0x61, 0xff])))
+        XCTAssertThrowsError(try ICCBOR.decodeStrict(Data([0x5f, 0x5f, 0xff, 0xff])))
+        XCTAssertThrowsError(try ICCBOR.decodeStrict(Data([0x7f, 0x61, 0xff, 0xff])))
+        XCTAssertThrowsError(try ICCBOR.decodeStrict(Data([
+            0xbf, 0x61, 0x61, 0x01, 0x7f, 0x61, 0x61, 0xff, 0x02, 0xff,
+        ])))
+        XCTAssertThrowsError(try ICCBOR.decodeStrict(
+            Data([0x9f, 0x01, 0x02, 0xff]),
+            maximumCollectionCount: 1
+        ))
     }
 
     func testRequestIDAndHashTreeVectors() throws {
