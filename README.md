@@ -1,6 +1,6 @@
 # ICNativeClient
 
-ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.6.0 adds shared Keychain sessions, explicit authentication target scopes, configurable network polling, and typed Candid null values.
+ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.0 adds build-time Candid-to-Swift bindings and P-256 Internet Identity delegation verification.
 
 It includes principal/account helpers, a Candid DIDL codec, explicit Swift model conversion, and raw Candid-byte transport.
 
@@ -199,7 +199,7 @@ The defaults remain a 20-second request timeout, a one-second polling interval, 
 
 `ICInternetIdentityAuthenticator` uses direct ICRC-167 URL transport on iOS 17.4 or newer. It binds the callback state and JSON-RPC request ID, forwards `derivationOrigin`, validates the session private/public key pair, and verifies every delegation signature, expiration, target, permission, and chain bound.
 
-The upcoming ICNativeClient 0.6.1 verification path accepts Internet Identity's P-256 intermediate delegation keys in addition to Ed25519 and canister-signature keys. P-256 keys must use the `id-ecPublicKey` and `prime256v1` SPKI identifiers with an uncompressed 65-byte public key, and signatures must use the 64-byte IEEE P1363 representation produced by WebCrypto.
+ICNativeClient 0.7.0 accepts Internet Identity's P-256 intermediate delegation keys in addition to Ed25519 and canister-signature keys. P-256 keys must use the `id-ecPublicKey` and `prime256v1` SPKI identifiers with an uncompressed 65-byte public key, and signatures must use the 64-byte IEEE P1363 representation produced by WebCrypto.
 
 The default delegation TTL is 8 hours. Callers may explicitly request a longer lifetime up to 30 days.
 
@@ -273,6 +273,10 @@ let sharedStore = ICIdentityStore(
 ```
 
 Every participating target must include that access group in its Keychain Sharing entitlement. ICNativeClient does not migrate items between access groups or from application-specific storage formats. If the shared item is initially absent, authenticate and save the session from the main application before an extension attempts to load it. An invalid access group or missing entitlement is reported as `ICClientError.keychainFailure`.
+
+## New in 0.7.0
+
+0.7.0 is a backward-compatible feature release. It adds the `ic-candid-swift-bindgen` CLI and SwiftPM build tool plugin, while extending delegation verification for P-256 intermediate keys used by Internet Identity. Existing ICNativeClient public APIs, stored session formats, principal derivation, and wire formats remain unchanged.
 
 ## New in 0.6.0
 
