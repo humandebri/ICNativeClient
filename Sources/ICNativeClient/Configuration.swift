@@ -35,6 +35,106 @@ public enum ICTrustRoot: Equatable, Sendable {
     ])
 }
 
+public struct ICNetworkConfiguration: Equatable, Sendable {
+    public static let defaultRequestTimeout: TimeInterval = 20
+    public static let defaultPollingInterval: Duration = .seconds(1)
+    public static let defaultMaximumPollingAttempts = 30
+    public static let `default` = ICNetworkConfiguration(
+        validatedRequestTimeout: defaultRequestTimeout,
+        pollingInterval: defaultPollingInterval,
+        maximumPollingAttempts: defaultMaximumPollingAttempts
+    )
+
+    public let requestTimeout: TimeInterval
+    public let pollingInterval: Duration
+    public let maximumPollingAttempts: Int
+
+    public init(
+        requestTimeout: TimeInterval = Self.defaultRequestTimeout,
+        pollingInterval: Duration = Self.defaultPollingInterval,
+        maximumPollingAttempts: Int = Self.defaultMaximumPollingAttempts
+    ) throws {
+        guard requestTimeout.isFinite, requestTimeout > 0 else {
+            throw ICClientError.invalidConfiguration("HTTP request timeout must be finite and greater than zero.")
+        }
+        guard pollingInterval > .zero else {
+            throw ICClientError.invalidConfiguration("Polling interval must be greater than zero.")
+        }
+        guard maximumPollingAttempts > 0 else {
+            throw ICClientError.invalidConfiguration("Maximum polling attempts must be greater than zero.")
+        }
+        self.init(
+            validatedRequestTimeout: requestTimeout,
+            pollingInterval: pollingInterval,
+            maximumPollingAttempts: maximumPollingAttempts
+        )
+    }
+
+    private init(
+        validatedRequestTimeout: TimeInterval,
+        pollingInterval: Duration,
+        maximumPollingAttempts: Int
+    ) {
+        requestTimeout = validatedRequestTimeout
+        self.pollingInterval = pollingInterval
+        self.maximumPollingAttempts = maximumPollingAttempts
+    }
+}
+
+public struct ICAuthenticationOptions: Equatable, Sendable {
+    public static let maximumTargets = 1_000
+    public static let `default` = ICAuthenticationOptions(
+        validatedMaxTimeToLiveNanoseconds: nil,
+        canonicalTargets: nil
+    )
+
+    public let maxTimeToLiveNanoseconds: UInt64?
+    public let targets: [String]?
+
+    public init(
+        maxTimeToLiveNanoseconds: UInt64? = nil,
+        targets: [String]? = nil
+    ) throws {
+        if let maxTimeToLiveNanoseconds {
+            guard maxTimeToLiveNanoseconds > 0,
+                  maxTimeToLiveNanoseconds <= ICClientConfiguration.maximumDelegationTTLNanoseconds else {
+                throw ICClientError.invalidConfiguration("Internet Identity delegation lifetime must not exceed 30 days.")
+            }
+        }
+
+        let canonicalTargets: [String]?
+        if let targets {
+            guard !targets.isEmpty, targets.count <= Self.maximumTargets else {
+                throw ICClientError.invalidConfiguration("Authentication targets must contain between 1 and 1000 canister IDs.")
+            }
+            let parsed = try targets.map { target -> String in
+                guard let principal = ICPrincipal.parse(target) else {
+                    throw ICClientError.invalidConfiguration("Authentication target is not a valid principal: \(target)")
+                }
+                return ICPrincipal.text(from: principal)
+            }
+            guard Set(parsed).count == parsed.count else {
+                throw ICClientError.invalidConfiguration("Authentication targets must not contain duplicates.")
+            }
+            canonicalTargets = parsed
+        } else {
+            canonicalTargets = nil
+        }
+        self.init(
+            validatedMaxTimeToLiveNanoseconds: maxTimeToLiveNanoseconds,
+            canonicalTargets: canonicalTargets
+        )
+    }
+
+    private init(
+        validatedMaxTimeToLiveNanoseconds: UInt64?,
+        canonicalTargets: [String]?
+    ) {
+        maxTimeToLiveNanoseconds = validatedMaxTimeToLiveNanoseconds
+        targets = canonicalTargets
+    }
+}
+
 public struct ICClientConfiguration: Equatable, Sendable {
     public static let defaultDelegationTTLNanoseconds: UInt64 = 28_800_000_000_000
     public static let maximumDelegationTTLNanoseconds: UInt64 = 2_592_000_000_000_000
@@ -47,6 +147,7 @@ public struct ICClientConfiguration: Equatable, Sendable {
     public let trustRoot: ICTrustRoot
     public let delegationTTLNanoseconds: UInt64
     public let maximumResponseBytes: Int
+    public let network: ICNetworkConfiguration
 
     public init(
         canisterId: String,
@@ -55,7 +156,8 @@ public struct ICClientConfiguration: Equatable, Sendable {
         derivationOrigin: String,
         trustRoot: ICTrustRoot = .mainnet,
         delegationTTLNanoseconds: UInt64 = Self.defaultDelegationTTLNanoseconds,
-        maximumResponseBytes: Int = Self.defaultMaximumResponseBytes
+        maximumResponseBytes: Int = Self.defaultMaximumResponseBytes,
+        network: ICNetworkConfiguration = .default
     ) throws {
         guard ICPrincipal.parse(canisterId) != nil else { throw ICClientError.invalidCanisterId }
         guard let resolvedAPIBaseURL = apiBaseURL ?? URL(string: "https://ic0.app"),
@@ -80,6 +182,7 @@ public struct ICClientConfiguration: Equatable, Sendable {
         self.trustRoot = trustRoot
         self.delegationTTLNanoseconds = delegationTTLNanoseconds
         self.maximumResponseBytes = maximumResponseBytes
+        self.network = network
     }
 
     public func apiURL(

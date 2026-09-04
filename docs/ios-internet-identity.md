@@ -22,6 +22,13 @@ expiration, targets, permissions, cycle/depth/target limits, and content caniste
 before returning an `ICAuthSession`. The default lifetime is 8 hours; callers may
 explicitly request a longer lifetime up to 30 days.
 
+`ICAuthenticationOptions` can override the lifetime for one authentication and request
+a non-empty list of target canisters. Targets are omitted by default to preserve the
+existing relying-party principal behavior. When targets are supplied, they must include
+the configured canister ID; the client rejects unscoped responses and effective target
+scopes that exceed the requested set. Opting into targets can enable an ICRC-34 account
+delegation and may therefore produce a different principal.
+
 Authentication itself has a separate 330-second default timeout. Cancelling the calling
 task cancels the active browser session. Shared browser state is used by default so
 passkeys and existing II sessions remain available; callers may explicitly request an
@@ -79,6 +86,7 @@ Mac-only `localhost` or `*.raw.localhost` URLs into the authentication session.
 This implementation was checked against:
 
 - [ICRC-167 draft at `cd5ef7d2`](https://github.com/dfinity/wg-identity-authentication/blob/cd5ef7d2be5337dda8c9988a4dca18bd120de34b/topics/icrc_167_browser_url_transport.md)
+- [ICRC-34 delegation specification](https://github.com/dfinity/wg-identity-authentication/blob/main/topics/icrc_34_delegation.md)
 - [Internet Identity release 2026-08-28](https://github.com/dfinity/internet-identity/releases/tag/release-2026-08-28)
 - Internet Identity URL transport blob `fce2059982dfde27f1e5403f24f49c95dac99992`
 - `@icp-sdk/signer` validation blob `d9486670ccb05b84d40ee11666e783560eb6c95f`

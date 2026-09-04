@@ -2,14 +2,25 @@ import CryptoKit
 import Foundation
 
 public final class ICClient: @unchecked Sendable {
-    private static let requestTimeout: TimeInterval = 20
     private let session: URLSession
+    private let sleep: @Sendable (Duration) async throws -> Void
     private let subnetCache = ICSubnetCache()
     public let configuration: ICClientConfiguration
 
-    public init(configuration: ICClientConfiguration, session: URLSession = .shared) {
+    public convenience init(configuration: ICClientConfiguration, session: URLSession = .shared) {
+        self.init(configuration: configuration, session: session) { duration in
+            try await Task.sleep(for: duration)
+        }
+    }
+
+    init(
+        configuration: ICClientConfiguration,
+        session: URLSession,
+        sleep: @escaping @Sendable (Duration) async throws -> Void
+    ) {
         self.configuration = configuration
         self.session = session
+        self.sleep = sleep
     }
 
     public func apiURL(
@@ -220,16 +231,17 @@ public final class ICClient: @unchecked Sendable {
         requestId: Data,
         canisterId: String? = nil,
         identity: ICAuthSession,
-        attempts: Int = 30
+        attempts: Int? = nil
     ) async throws -> Data {
         let effectiveText = canisterId ?? configuration.canisterId
-        guard requestId.count == 32, let effective = ICPrincipal.parse(effectiveText), attempts > 0 else {
+        let maximumAttempts = attempts ?? configuration.network.maximumPollingAttempts
+        guard requestId.count == 32, let effective = ICPrincipal.parse(effectiveText), maximumAttempts > 0 else {
             throw ICClientError.invalidConfiguration("Poll requires a 32-byte request ID and at least one attempt.")
         }
         try validateIdentityForRequest(identity, requestCanisterId: effectiveText, permission: .readState)
         let url = try apiURL(for: "read_state", canisterId: effectiveText)
-        for _ in 0..<attempts {
-            try await Task.sleep(for: .seconds(1))
+        for _ in 0..<maximumAttempts {
+            try await sleep(configuration.network.pollingInterval)
             let content = readStateContent(
                 paths: [[Data("request_status".utf8), requestId]],
                 identity: identity
@@ -480,7 +492,7 @@ public final class ICClient: @unchecked Sendable {
     private func postCBOR(_ body: Data, to url: URL, operation: String) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = Self.requestTimeout
+        request.timeoutInterval = configuration.network.requestTimeout
         request.setValue("application/cbor", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
         do {

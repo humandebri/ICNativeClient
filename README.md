@@ -134,6 +134,23 @@ Rejects are exposed as `ICClientError.rejected(ICReject)`, including reject code
 
 For management-canister calls, `canisterId` remains the content canister ID used for delegation targets, while `effectiveCanisterId` controls HTTP routing and certificate range authorization.
 
+HTTP and polling behavior can be tuned without replacing the transport:
+
+```swift
+let network = try ICNetworkConfiguration(
+    requestTimeout: 15,
+    pollingInterval: .milliseconds(500),
+    maximumPollingAttempts: 20
+)
+let configuration = try ICClientConfiguration(
+    canisterId: canisterID,
+    derivationOrigin: derivationOrigin,
+    network: network
+)
+```
+
+The defaults remain a 20-second request timeout, a one-second polling interval, and 30 polling attempts. Passing `attempts` directly to `poll` overrides the configured maximum for that call.
+
 ## Internet Identity native authentication
 
 `ICInternetIdentityAuthenticator` uses direct ICRC-167 URL transport on iOS 17.4 or newer. It binds the callback state and JSON-RPC request ID, forwards `derivationOrigin`, validates the session private/public key pair, and verifies every delegation signature, expiration, target, permission, and chain bound.
@@ -154,6 +171,18 @@ let identity = try await authenticator.authenticate(
     prefersEphemeralWebBrowserSession: false
 )
 ```
+
+Authentication omits `targets` by default to preserve the existing relying-party principal behavior. To require a canister-scoped delegation, pass explicit targets containing the configured canister and every additional canister the session will call:
+
+```swift
+let options = try ICAuthenticationOptions(
+    maxTimeToLiveNanoseconds: 3_600_000_000_000,
+    targets: [configuration.canisterId, ledgerCanisterID]
+)
+let identity = try await authenticator.authenticate(options: options)
+```
+
+Explicit targets must be valid, unique principal texts. ICNativeClient rejects an unscoped response or a response whose effective target scope exceeds the requested set. Because ICRC-34 targets can enable an account delegation, opting into them may produce a different principal than the default relying-party delegation. A per-authentication lifetime overrides the authenticator and client-configuration defaults.
 
 Authorization times out after 330 seconds by default and throws `ICClientError.authorizationTimedOut`. Cancelling the calling task cancels the active browser session. The shared browser session remains the default so passkeys and existing Internet Identity sessions are available; use an ephemeral session only for an intentional clean-session flow.
 

@@ -43,6 +43,9 @@ final class ICNativeClientTests: XCTestCase {
         let config = try configuration(root: BLSTKey(seed: 1).derPublicKey)
         XCTAssertEqual(config.delegationTTLNanoseconds, 28_800_000_000_000)
         XCTAssertEqual(config.maximumResponseBytes, 10 * 1_024 * 1_024)
+        XCTAssertEqual(config.network.requestTimeout, 20)
+        XCTAssertEqual(config.network.pollingInterval, .seconds(1))
+        XCTAssertEqual(config.network.maximumPollingAttempts, 30)
         XCTAssertThrowsError(try ICClientConfiguration(
             canisterId: canisterText,
             apiBaseURL: URL(string: "http://ic0.app")!,
@@ -62,6 +65,10 @@ final class ICNativeClientTests: XCTestCase {
             derivationOrigin: "https://example.com",
             trustRoot: .custom(Data(repeating: 0, count: 133))
         ))
+        XCTAssertThrowsError(try ICNetworkConfiguration(requestTimeout: 0))
+        XCTAssertThrowsError(try ICNetworkConfiguration(requestTimeout: .infinity))
+        XCTAssertThrowsError(try ICNetworkConfiguration(pollingInterval: .zero))
+        XCTAssertThrowsError(try ICNetworkConfiguration(maximumPollingAttempts: 0))
     }
 
     func testAPIURLIsStructuredAndRejectsArbitraryRequestType() throws {
@@ -805,10 +812,107 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertEqual(pending.maxTimeToLiveNanoseconds, 28_800_000_000_000)
         XCTAssertEqual(parameters["maxTimeToLive"] as? String, "28800000000000")
         XCTAssertEqual(parameters["icrc95DerivationOrigin"] as? String, config.derivationOrigin)
+        XCTAssertNil(parameters["targets"])
         XCTAssertNotEqual(pending.requestID, pending.state)
         XCTAssertEqual(fields["callback"], callback.absoluteString)
         XCTAssertFalse(url.absoluteString.contains("native-auth"))
         XCTAssertNil(components.queryItems?.first { ["message", "callback", "state"].contains($0.name) })
+    }
+
+    func testICRC167RequestsAndEnforcesExplicitTargetScope() throws {
+        let config = try configuration(root: BLSTKey(seed: 30).derPublicKey)
+        let requestedTargets = [canisterText, "aaaaa-aa"]
+        let pending = try ICRC167Codec.makePendingRequest(targets: requestedTargets, requestedAt: Date())
+        let callback = URL(string: "https://app.example/ios-auth-callback")!
+        let url = try ICRC167Codec.authorizationURL(
+            configuration: config,
+            callbackURL: callback,
+            pendingRequest: pending
+        )
+        let fragment = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedFragment)
+        let fields = try ICRC167Codec.parseFormEncoded(fragment)
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(fields["message"]!.utf8)) as? [String: Any])
+        let parameters = try XCTUnwrap(request["params"] as? [String: Any])
+        XCTAssertEqual(parameters["targets"] as? [String], requestedTargets)
+
+        XCTAssertNoThrow(try parseICRC(
+            try icrcCallback(pending: pending, targets: [canisterText]),
+            pending: pending,
+            config: config
+        ))
+
+        let unscoped = try ICRC167Codec.makePendingRequest(targets: requestedTargets, requestedAt: Date())
+        XCTAssertThrowsError(try parseICRC(
+            try icrcCallback(pending: unscoped),
+            pending: unscoped,
+            config: config
+        ))
+
+        let expanded = try ICRC167Codec.makePendingRequest(targets: requestedTargets, requestedAt: Date())
+        XCTAssertThrowsError(try parseICRC(
+            try icrcCallback(pending: expanded, targets: [canisterText, "2vxsx-fae"]),
+            pending: expanded,
+            config: config
+        ))
+
+        XCTAssertThrowsError(try ICAuthenticationOptions(targets: []))
+        XCTAssertThrowsError(try ICAuthenticationOptions(targets: [canisterText, canisterText]))
+        XCTAssertThrowsError(try ICAuthenticationOptions(targets: ["not-a-principal"]))
+        XCTAssertThrowsError(try ICAuthenticationOptions(maxTimeToLiveNanoseconds: 0))
+        let missingConfigured = try ICRC167Codec.makePendingRequest(targets: ["aaaaa-aa"])
+        XCTAssertThrowsError(try ICRC167Codec.authorizationURL(
+            configuration: config,
+            callbackURL: callback,
+            pendingRequest: missingConfigured
+        ))
+    }
+
+    func testNetworkConfigurationControlsRequestTimeoutPollingIntervalAndAttempts() async throws {
+        let root = BLSTKey(seed: 32)
+        let network = try ICNetworkConfiguration(
+            requestTimeout: 7,
+            pollingInterval: .milliseconds(25),
+            maximumPollingAttempts: 2
+        )
+        let config = try ICClientConfiguration(
+            canisterId: canisterText,
+            derivationOrigin: "https://example.com",
+            trustRoot: .custom(root.derPublicKey),
+            network: network
+        )
+        let identity = try makeAuthSession(config: config)
+        let recorder = NetworkRecorder()
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [URLProtocolStub.self]
+        URLProtocolStub.handler = { request in
+            recorder.record(requestTimeout: request.timeoutInterval)
+            let certificate = try self.makeCertificate(leaves: [
+                ([Data("time".utf8)], ICRequestID.leb128(self.nanoseconds(Date()))),
+            ], key: root)
+            return response(request, status: 200, body: readStateResponse(certificate))
+        }
+        let configuredClient = ICClient(
+            configuration: config,
+            session: URLSession(configuration: sessionConfiguration)
+        ) { duration in
+            recorder.record(sleepDuration: duration)
+        }
+
+        await XCTAssertThrowsErrorAsync(
+            try await configuredClient.poll(requestId: Data(count: 32), identity: identity)
+        ) { error in
+            XCTAssertEqual(error as? ICClientError, .pollTimeout)
+        }
+        XCTAssertEqual(recorder.requestTimeouts, [7, 7])
+        XCTAssertEqual(recorder.sleepDurations, [.milliseconds(25), .milliseconds(25)])
+
+        await XCTAssertThrowsErrorAsync(
+            try await configuredClient.poll(requestId: Data(count: 32), identity: identity, attempts: 1)
+        ) { error in
+            XCTAssertEqual(error as? ICClientError, .pollTimeout)
+        }
+        XCTAssertEqual(recorder.requestTimeouts, [7, 7, 7])
+        XCTAssertEqual(recorder.sleepDurations, [.milliseconds(25), .milliseconds(25), .milliseconds(25)])
     }
 
     func testICRC167AcceptsSignedOneAndTwoHopResponses() throws {
@@ -1010,13 +1114,17 @@ final class ICNativeClientTests: XCTestCase {
         return Data([0x1a]) + Data("ic-request-auth-delegation".utf8) + ICRequestID.hash(of: .map(fields))
     }
 
-    private func icrcPending(ttl: UInt64 = ICRC167Codec.defaultMaxTimeToLiveNanoseconds) -> ICRC167PendingRequest {
+    private func icrcPending(
+        ttl: UInt64 = ICRC167Codec.defaultMaxTimeToLiveNanoseconds,
+        targets: [String]? = nil
+    ) -> ICRC167PendingRequest {
         ICRC167PendingRequest(
             requestID: UUID().uuidString,
             state: UUID().uuidString,
             privateKey: Curve25519.Signing.PrivateKey(),
             requestedAt: Date(),
-            maxTimeToLiveNanoseconds: ttl
+            maxTimeToLiveNanoseconds: ttl,
+            requestedTargets: targets
         )
     }
 
@@ -1311,6 +1419,23 @@ private final class MockKeychain: ICKeychainAccess, @unchecked Sendable {
         deleteQueries.append(query as? [String: Any] ?? [:])
         data = nil
         return errSecSuccess
+    }
+}
+
+private final class NetworkRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedRequestTimeouts: [TimeInterval] = []
+    private var recordedSleepDurations: [Duration] = []
+
+    var requestTimeouts: [TimeInterval] { lock.withLock { recordedRequestTimeouts } }
+    var sleepDurations: [Duration] { lock.withLock { recordedSleepDurations } }
+
+    func record(requestTimeout: TimeInterval) {
+        lock.withLock { recordedRequestTimeouts.append(requestTimeout) }
+    }
+
+    func record(sleepDuration: Duration) {
+        lock.withLock { recordedSleepDurations.append(sleepDuration) }
     }
 }
 

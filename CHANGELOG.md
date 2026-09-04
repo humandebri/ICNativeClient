@@ -8,6 +8,8 @@ All notable changes are documented here.
 
 - Optional Keychain access-group selection for sharing `ICIdentityStore` sessions between an application and its extensions.
 - `CandidNull`, a typed `CandidConvertible` representation of the Candid `null` value.
+- Per-authentication delegation lifetime and explicit target-scope options with response-scope enforcement.
+- Configurable HTTP request timeout, polling interval, and default maximum polling attempts.
 
 ## [0.5.0] - 2026-09-04
 

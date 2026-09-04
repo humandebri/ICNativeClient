@@ -8,6 +8,7 @@ final class ICRC167PendingRequest {
     let privateKey: Curve25519.Signing.PrivateKey
     let requestedAt: Date
     let maxTimeToLiveNanoseconds: UInt64
+    let requestedTargets: [String]?
     private(set) var isConsumed = false
 
     init(
@@ -15,13 +16,15 @@ final class ICRC167PendingRequest {
         state: String,
         privateKey: Curve25519.Signing.PrivateKey,
         requestedAt: Date,
-        maxTimeToLiveNanoseconds: UInt64
+        maxTimeToLiveNanoseconds: UInt64,
+        requestedTargets: [String]? = nil
     ) {
         self.requestID = requestID
         self.state = state
         self.privateKey = privateKey
         self.requestedAt = requestedAt
         self.maxTimeToLiveNanoseconds = maxTimeToLiveNanoseconds
+        self.requestedTargets = requestedTargets
     }
 
     func consume() throws {
@@ -42,18 +45,20 @@ enum ICRC167Codec {
 
     static func makePendingRequest(
         maxTimeToLiveNanoseconds: UInt64 = defaultMaxTimeToLiveNanoseconds,
+        targets: [String]? = nil,
         requestedAt: Date = Date()
     ) throws -> ICRC167PendingRequest {
-        guard maxTimeToLiveNanoseconds > 0,
-              maxTimeToLiveNanoseconds <= ICClientConfiguration.maximumDelegationTTLNanoseconds else {
-            throw ICClientError.invalidConfiguration("Internet Identity delegation lifetime must not exceed 30 days.")
-        }
+        let options = try ICAuthenticationOptions(
+            maxTimeToLiveNanoseconds: maxTimeToLiveNanoseconds,
+            targets: targets
+        )
         return ICRC167PendingRequest(
             requestID: try randomToken(byteCount: 16),
             state: try randomToken(byteCount: 32),
             privateKey: Curve25519.Signing.PrivateKey(),
             requestedAt: requestedAt,
-            maxTimeToLiveNanoseconds: maxTimeToLiveNanoseconds
+            maxTimeToLiveNanoseconds: maxTimeToLiveNanoseconds,
+            requestedTargets: options.targets
         )
     }
 
@@ -64,8 +69,14 @@ enum ICRC167Codec {
     ) throws -> URL {
         try validateInternetIdentityURL(configuration.internetIdentityURL)
         try validateCallbackURL(callbackURL)
-        guard ICPrincipal.parse(configuration.canisterId) != nil else {
+        guard let configuredCanister = ICPrincipal.parse(configuration.canisterId) else {
             throw ICClientError.invalidCanisterId
+        }
+        if let targets = pendingRequest.requestedTargets,
+           !targets.compactMap(ICPrincipal.parse).contains(configuredCanister) {
+            throw ICClientError.invalidConfiguration(
+                "Authentication targets must include the configured canister ID."
+            )
         }
 
         let publicKey = derPublicKey(from: pendingRequest.privateKey.publicKey.rawRepresentation)
@@ -76,7 +87,8 @@ enum ICRC167Codec {
             params: DelegationRequestParameters(
                 publicKey: publicKey.base64EncodedString(),
                 maxTimeToLive: String(pendingRequest.maxTimeToLiveNanoseconds),
-                icrc95DerivationOrigin: configuration.derivationOrigin
+                icrc95DerivationOrigin: configuration.derivationOrigin,
+                targets: pendingRequest.requestedTargets
             )
         )
         let message: Data
@@ -149,6 +161,10 @@ enum ICRC167Codec {
                 permission: nil,
                 trustRoot: configuration.trustRoot,
                 now: now
+            )
+            try validateRequestedTargetScope(
+                chain,
+                requestedTargets: pendingRequest.requestedTargets
             )
             let principal = ICPrincipal.text(from: ICPrincipal.selfAuthenticatingPublicKey(chain.publicKey))
             return ICAuthSession(
@@ -286,6 +302,27 @@ enum ICRC167Codec {
         return ICDelegationChain(publicKey: publicKey, delegations: delegations)
     }
 
+    private static func validateRequestedTargetScope(
+        _ chain: ICDelegationChain,
+        requestedTargets: [String]?
+    ) throws {
+        guard let requestedTargets else { return }
+        let requested = Set(try requestedTargets.map { target -> Data in
+            guard let principal = ICPrincipal.parse(target) else { throw ICClientError.invalidPayload }
+            return principal
+        })
+        var effectiveTargets: Set<Data>?
+        for delegation in chain.delegations.compactMap(\.delegation.targets) {
+            let targets = Set(delegation)
+            effectiveTargets = effectiveTargets.map { $0.intersection(targets) } ?? targets
+        }
+        guard let effectiveTargets,
+              !effectiveTargets.isEmpty,
+              effectiveTargets.isSubset(of: requested) else {
+            throw ICClientError.invalidPayload
+        }
+    }
+
     private static func validateResponseSchema(_ data: Data) throws {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw ICClientError.invalidPayload
@@ -409,6 +446,7 @@ private struct DelegationRequestParameters: Encodable {
     let publicKey: String
     let maxTimeToLive: String
     let icrc95DerivationOrigin: String
+    let targets: [String]?
 }
 
 private struct JSONRPCResponse: Decodable {
