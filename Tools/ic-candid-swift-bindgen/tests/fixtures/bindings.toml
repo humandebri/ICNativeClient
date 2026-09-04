@@ -1,0 +1,5 @@
+[[canister]]
+name = "Ledger"
+did = "Tools/ic-candid-swift-bindgen/tests/fixtures/service.did"
+canister_id = "ryjl3-tyaaa-aaaaa-aaaba-cai"
+methods = ["account_balance", "transfer", "status", "walk", "numeric_fields"]

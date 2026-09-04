@@ -12,6 +12,7 @@ let package = Package(
     ],
     products: [
         .library(name: "ICNativeClient", targets: ["ICNativeClient"]),
+        .plugin(name: "ICNativeClientBindgenPlugin", targets: ["ICNativeClientBindgenPlugin"]),
     ],
     targets: [
         .target(
@@ -25,6 +26,15 @@ let package = Package(
             ]
         ),
         .target(name: "ICNativeClient", dependencies: ["CBlst"]),
+        .binaryTarget(
+            name: "ICNativeClientBindgenTool",
+            path: "Artifacts/ICNativeClientBindgen.artifactbundle"
+        ),
+        .plugin(
+            name: "ICNativeClientBindgenPlugin",
+            capability: .buildTool(),
+            dependencies: ["ICNativeClientBindgenTool"]
+        ),
         .testTarget(
             name: "ICNativeClientTests",
             dependencies: ["ICNativeClient", "CBlst"],

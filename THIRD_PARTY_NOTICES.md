@@ -11,6 +11,15 @@
 
 The complete upstream Apache-2.0 license is included at `Vendor/blst/LICENSE`. Vendored source files are unmodified; the SwiftPM manifest only selects the upstream C entry point, assembly dispatcher, headers, and Apple assembly sources needed by this package.
 
+## Candid parser
+
+- Projects: `dfinity/candid` and `dfinity/candid_parser`
+- Versions: `candid 0.10.35`, `candid_parser 0.4.1`
+- License: Apache License 2.0
+- Upstream: https://github.com/dfinity/candid
+
+These crates and their transitive Rust dependencies are locked in `Tools/ic-candid-swift-bindgen/Cargo.lock` and are linked into the build-time executable artifacts. They are not linked into application binaries or the ICNativeClient runtime library.
+
 ## agent-rs test vector
 
 - Project: `dfinity/agent-rs` / `ic-agent`

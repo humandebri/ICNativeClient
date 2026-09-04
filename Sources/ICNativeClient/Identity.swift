@@ -315,11 +315,25 @@ enum ICIdentityValidation {
         let spki = try ICDERSubjectPublicKeyInfo(data: signerDERKey)
         switch spki.algorithmOID {
         case ICDERSubjectPublicKeyInfo.ed25519OID:
-            guard spki.key.count == 32,
+            guard spki.parametersOID == nil,
+                  spki.key.count == 32,
                   let key = try? Curve25519.Signing.PublicKey(rawRepresentation: spki.key),
                   key.isValidSignature(signature, for: payload) else { throw ICClientError.invalidIdentity("Broken Ed25519 delegation signature.") }
+        case ICDERSubjectPublicKeyInfo.ecPublicKeyOID:
+            guard spki.parametersOID == ICDERSubjectPublicKeyInfo.prime256v1OID,
+                  spki.key.count == 65,
+                  spki.key.first == 0x04,
+                  signature.count == 64,
+                  let key = try? P256.Signing.PublicKey(x963Representation: spki.key),
+                  let p256Signature = try? P256.Signing.ECDSASignature(rawRepresentation: signature),
+                  key.isValidSignature(p256Signature, for: payload) else {
+                throw ICClientError.invalidIdentity("Broken P-256 delegation signature.")
+            }
         case ICDERSubjectPublicKeyInfo.canisterSignatureOID:
-            guard let length = spki.key.first.map(Int.init), length <= 29, spki.key.count >= 1 + length else { throw ICClientError.invalidPayload }
+            guard spki.parametersOID == nil,
+                  let length = spki.key.first.map(Int.init),
+                  length <= 29,
+                  spki.key.count >= 1 + length else { throw ICClientError.invalidPayload }
             let canister = spki.key.subdata(in: 1..<(1 + length))
             let seed = spki.key.dropFirst(1 + length)
             try ICCertificateVerifier.verifyCanisterSignature(
@@ -344,9 +358,12 @@ enum ICIdentityValidation {
 
 private struct ICDERSubjectPublicKeyInfo {
     static let ed25519OID = Data([0x2b, 0x65, 0x70])
+    static let ecPublicKeyOID = Data([0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01])
+    static let prime256v1OID = Data([0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07])
     static let canisterSignatureOID = Data([0x2b, 0x06, 0x01, 0x04, 0x01, 0x83, 0xb8, 0x43, 0x01, 0x02])
 
     let algorithmOID: Data
+    let parametersOID: Data?
     let key: Data
 
     init(data: Data) throws {
@@ -355,6 +372,7 @@ private struct ICDERSubjectPublicKeyInfo {
         guard outer.isAtEnd else { throw ICClientError.invalidPayload }
         var algorithm = try sequence.readConstructed(tag: 0x30)
         algorithmOID = try algorithm.readValue(tag: 0x06)
+        parametersOID = algorithm.isAtEnd ? nil : try algorithm.readValue(tag: 0x06)
         guard algorithm.isAtEnd else { throw ICClientError.invalidPayload }
         let bitString = try sequence.readValue(tag: 0x03)
         guard sequence.isAtEnd, bitString.first == 0 else { throw ICClientError.invalidPayload }

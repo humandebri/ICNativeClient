@@ -1,0 +1,28 @@
+type Entry = record {
+  id : nat64;
+  label : text;
+};
+
+type Containers = record {
+  optional_text : opt text;
+  texts : vec text;
+};
+
+type ReservedNames = record {
+  candid_value : text;
+};
+
+type Chain = variant {
+  end;
+  next : opt Chain;
+};
+
+service : {
+  lookup : (nat64) -> (opt Entry) query;
+  store : (Entry) -> (variant { ok; err : text });
+  echo_chain : (Chain) -> (Chain) query;
+  containers : (Containers) -> (Containers) query;
+  client : () -> () query;
+  canister_id : (ReservedNames) -> (ReservedNames) query;
+  "control\0bmethod" : () -> () query;
+};

@@ -12,6 +12,50 @@ It includes principal/account helpers, a Candid DIDL codec, explicit Swift model
 
 Add the repository as a Swift Package dependency and link the `ICNativeClient` product. The fixed `blst` C sources required for BLS verification are vendored, so consumers do not download a crypto binary.
 
+## Candid Swift bindings
+
+`ic-candid-swift-bindgen` 0.1.0 generates typed `CandidConvertible` models and canister clients from checked-in Candid interfaces. The generator uses the Candid parser for the schema and the existing ICNativeClient runtime for DIDL encoding, decoding, verified queries, updates, and authentication.
+
+Add `ICNativeClientBindgenPlugin` to the application target that owns the bindings:
+
+```swift
+.target(
+    name: "App",
+    dependencies: [
+        .product(name: "ICNativeClient", package: "ICNativeClient"),
+    ],
+    plugins: [
+        .plugin(name: "ICNativeClientBindgenPlugin", package: "ICNativeClient"),
+    ]
+)
+```
+
+Place exactly one manifest at a path ending in `Candid/bindings.toml` inside the consuming package. DID paths are relative to the package root:
+
+```toml
+[[canister]]
+name = "Ledger"
+did = "Sources/App/Candid/ledger.did"
+canister_id = "ryjl3-tyaaa-aaaaa-aaaba-cai"
+methods = ["account_balance", "transfer"]
+```
+
+The plugin writes `ICNativeClientCandidBindings.swift` only to SwiftPM's plugin work directory, which Xcode treats as Derived Sources. Generated Swift is not added to the consumer repository. A missing manifest, multiple manifests, an unknown key or method, an invalid canister ID, a path outside the package, or an unsupported Candid type fails the build.
+
+The CLI can also be built and run directly:
+
+```bash
+cargo run --release \
+  --manifest-path Tools/ic-candid-swift-bindgen/Cargo.toml \
+  -- \
+  --manifest ios/Candid/bindings.toml \
+  --output "$DERIVED_SOURCES_DIR/TaggrCanisters.swift"
+```
+
+Use `ic-candid-swift-bindgen --build-info` to print the CLI version and the SHA-256 of the Rust source, Cargo files, and artifact build script embedded at compile time. Maintainers can run `Tools/ic-candid-swift-bindgen/scripts/verify-artifact-bundle.sh` to confirm that both bundled macOS architectures carry the current build information and generate byte-identical fixture output.
+
+Version 0.1.0 supports booleans, fixed-width integers, arbitrary-precision `nat` and `int`, text, blobs, principals, optionals, vectors, records, variants, positional multi-value method boundaries, numeric field IDs, and self-recursive named records and variants. It intentionally rejects floats, `reserved`, `empty`, function/service values, one-way methods, recursive aliases, and mutually recursive type groups. Query and composite-query methods use the verified query path; update methods require an `ICAuthSession` and expose the optional effective routing canister ID needed for management-canister calls.
+
 ## Trust and verification model
 
 The following APIs authenticate responses before returning application data:
@@ -154,6 +198,8 @@ The defaults remain a 20-second request timeout, a one-second polling interval, 
 ## Internet Identity native authentication
 
 `ICInternetIdentityAuthenticator` uses direct ICRC-167 URL transport on iOS 17.4 or newer. It binds the callback state and JSON-RPC request ID, forwards `derivationOrigin`, validates the session private/public key pair, and verifies every delegation signature, expiration, target, permission, and chain bound.
+
+The upcoming ICNativeClient 0.6.1 verification path accepts Internet Identity's P-256 intermediate delegation keys in addition to Ed25519 and canister-signature keys. P-256 keys must use the `id-ecPublicKey` and `prime256v1` SPKI identifiers with an uncompressed 65-byte public key, and signatures must use the 64-byte IEEE P1363 representation produced by WebCrypto.
 
 The default delegation TTL is 8 hours. Callers may explicitly request a longer lifetime up to 30 days.
 
