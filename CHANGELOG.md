@@ -2,6 +2,17 @@
 
 All notable changes are documented here.
 
+## [0.7.3] - 2026-09-05
+
+### Fixed
+
+- Generated Swift bindings now decode Candid-compatible reply subtypes: reply records may add fields, and compatible optional, vector, numeric, and recursive values are projected to the Swift model's expected type.
+- Generated variants remain strict: unknown or added cases and changed case payload types are rejected rather than silently misdecoded.
+
+### Compatibility
+
+- ICNativeClient 0.7.3 is a patch release with no public API, session, principal, or wire-format changes. The bundled generator is `ic-candid-swift-bindgen` 0.1.2.
+
 ## [0.7.2] - 2026-09-05
 
 ### Fixed

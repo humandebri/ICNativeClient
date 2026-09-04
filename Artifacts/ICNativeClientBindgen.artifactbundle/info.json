@@ -3,14 +3,14 @@
   "artifacts": {
     "ic-candid-swift-bindgen": {
       "type": "executable",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "variants": [
         {
-          "path": "ic-candid-swift-bindgen-0.1.1-macos-arm64/bin/ic-candid-swift-bindgen",
+          "path": "ic-candid-swift-bindgen-0.1.2-macos-arm64/bin/ic-candid-swift-bindgen",
           "supportedTriples": ["arm64-apple-macosx"]
         },
         {
-          "path": "ic-candid-swift-bindgen-0.1.1-macos-x86_64/bin/ic-candid-swift-bindgen",
+          "path": "ic-candid-swift-bindgen-0.1.2-macos-x86_64/bin/ic-candid-swift-bindgen",
           "supportedTriples": ["x86_64-apple-macosx"]
         }
       ]

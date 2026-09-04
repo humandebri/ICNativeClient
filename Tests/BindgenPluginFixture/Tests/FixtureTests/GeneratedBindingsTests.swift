@@ -45,6 +45,146 @@ final class GeneratedBindingsTests: XCTestCase {
         ])))
     }
 
+    func testGeneratedDecoderAcceptsDirectionalRecordVectorOptionalAndRecursiveSubtypes() throws {
+        let id = Candid.fieldID("id")
+        let label = Candid.fieldID("label")
+        let future = Candid.fieldID("future")
+        let expandedEntryFields = [
+            CandidField(id: id, type: .nat64),
+            CandidField(id: label, type: .text),
+            CandidField(id: future, type: .bool),
+        ]
+        let expandedEntry = CandidValue.record(expandedEntryFields, [
+            id: .nat64(42),
+            label: .text("compatible"),
+            future: .bool(true),
+        ])
+        let entry = try SelfCanister._ICBindgenSupport.decode(
+            CandidTypedValue(type: .record(expandedEntryFields), value: expandedEntry),
+            as: FixtureEntry.self,
+            context: "record"
+        )
+        XCTAssertEqual(entry.id, 42)
+        XCTAssertEqual(entry.label, "compatible")
+
+        let vector = try SelfCanister._ICBindgenSupport.decode(
+            CandidTypedValue(
+                type: .vector(.record(expandedEntryFields)),
+                value: .vector(.record(expandedEntryFields), [expandedEntry])
+            ),
+            as: [FixtureEntry].self,
+            context: "vector"
+        )
+        XCTAssertEqual(vector.map(\.label), ["compatible"])
+
+        let optional = try SelfCanister._ICBindgenSupport.decode(
+            CandidTypedValue(type: .record(expandedEntryFields), value: expandedEntry),
+            as: FixtureEntry?.self,
+            context: "optional"
+        )
+        XCTAssertEqual(optional?.id, 42)
+
+        let recursiveID: UInt32 = 99
+        let recursiveFields = [
+            CandidField(id: Candid.fieldID("value"), type: .text),
+            CandidField(id: Candid.fieldID("next"), type: .optional(.reference(recursiveID))),
+            CandidField(id: future, type: .bool),
+        ]
+        let recursiveValue = CandidValue.record(recursiveFields, [
+            Candid.fieldID("value"): .text("root"),
+            Candid.fieldID("next"): .optional(.reference(recursiveID), nil),
+            future: .bool(true),
+        ])
+        let recursive = try SelfCanister._ICBindgenSupport.decode(
+            CandidTypedValue(
+                type: .recursive(id: recursiveID, body: .record(recursiveFields)),
+                value: recursiveValue
+            ),
+            as: FixtureRecursiveRecord.self,
+            context: "recursive record"
+        )
+        XCTAssertEqual(recursive.value, "root")
+        XCTAssertNil(recursive.next)
+    }
+
+    func testGeneratedDecoderSupportsNumericAndOptionalCandidSubtypes() throws {
+        XCTAssertEqual(
+            try SelfCanister._ICBindgenSupport.decode(
+                CandidTypedValue(type: .nat64, value: .nat64(42)),
+                as: CandidInt.self,
+                context: "numeric"
+            ).decimal,
+            "42"
+        )
+        XCTAssertEqual(
+            try SelfCanister._ICBindgenSupport.decode(
+                CandidTypedValue(type: .nat8, value: .nat8(42)),
+                as: UInt64?.self,
+                context: "optional numeric"
+            ),
+            42
+        )
+        XCTAssertNil(try SelfCanister._ICBindgenSupport.decode(
+            CandidTypedValue(type: .text, value: .text("not a nat")),
+            as: UInt64?.self,
+            context: "optional fallback"
+        ))
+        XCTAssertNil(try SelfCanister._ICBindgenSupport.decode(
+            CandidTypedValue(type: .optional(.text), value: .optional(.text, .text("not a nat"))),
+            as: UInt64?.self,
+            context: "optional nested fallback"
+        ))
+    }
+
+    func testGeneratedDecoderRejectsVariantExpansionChangesAndMissingRequiredRecordFields() throws {
+        let expandedVariantFields = [
+            CandidField(id: Candid.fieldID("ok"), type: .null),
+            CandidField(id: Candid.fieldID("err"), type: .text),
+            CandidField(id: Candid.fieldID("future"), type: .null),
+        ]
+        XCTAssertThrowsError(try SelfCanister._ICBindgenSupport.decode(
+            CandidTypedValue(
+                type: .variant(expandedVariantFields),
+                value: .variant(try CandidVariant(
+                    fields: expandedVariantFields,
+                    tag: Candid.fieldID("ok"),
+                    value: .null
+                ))
+            ),
+            as: FixtureStoreResult.self,
+            context: "expanded variant"
+        ))
+
+        let changedVariantFields = [
+            CandidField(id: Candid.fieldID("ok"), type: .null),
+            CandidField(id: Candid.fieldID("err"), type: .nat64),
+        ]
+        XCTAssertThrowsError(try SelfCanister._ICBindgenSupport.decode(
+            CandidTypedValue(
+                type: .variant(changedVariantFields),
+                value: .variant(try CandidVariant(
+                    fields: changedVariantFields,
+                    tag: Candid.fieldID("err"),
+                    value: .nat64(1)
+                ))
+            ),
+            as: FixtureStoreResult.self,
+            context: "changed variant payload"
+        ))
+
+        let missingID = Candid.fieldID("id")
+        let labelID = Candid.fieldID("label")
+        let missingRequiredFields = [CandidField(id: labelID, type: .text)]
+        XCTAssertThrowsError(try SelfCanister._ICBindgenSupport.decode(
+            CandidTypedValue(
+                type: .record(missingRequiredFields),
+                value: .record(missingRequiredFields, [labelID: .text("missing")])
+            ),
+            as: FixtureEntry.self,
+            context: "missing record field \(missingID)"
+        ))
+    }
+
     func testRecursiveTypedDecodeIgnoresBinderIDsButRejectsDifferentShapes() throws {
         let endID = Candid.fieldID("end")
         let nextID = Candid.fieldID("next")
