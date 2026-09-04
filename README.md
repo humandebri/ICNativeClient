@@ -1,6 +1,6 @@
 # ICNativeClient
 
-ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.4.0 makes response verification the default and provides direct ICRC-167 Internet Identity authentication on iOS 17.4 or newer.
+ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.5.0 adds typed Candid encoding, decoding, and verified calls while retaining the raw transport APIs introduced in 0.4.0.
 
 It includes principal/account helpers, a Candid DIDL codec, explicit Swift model conversion, and raw Candid-byte transport.
 
@@ -184,6 +184,10 @@ let restored = try store.load() // nil only when no item is registered
 ```
 
 Saving updates an existing item first and adds only when absent, so an update failure does not delete the prior session. Keychain failures and malformed legacy data are thrown without deleting stored bytes; only an absent item returns `nil`.
+
+## New in 0.5.0
+
+0.5.0 is a backward-compatible feature release that adds the typed Candid APIs described above. Existing `queryRaw`, `unsafeQueryRaw`, and `callRaw` integrations continue to work unchanged. Applications can adopt `CandidConvertible`, `queryCandid`, and `callCandid` incrementally for calls where schema-aware encoding and decoding are useful.
 
 ## Migration to 0.4.0
 

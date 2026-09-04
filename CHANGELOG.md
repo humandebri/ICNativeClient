@@ -4,6 +4,20 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-04
+
+### Added
+
+- A DIDL codec with explicit `CandidType`, `CandidValue`, and `CandidTypedValue` representations.
+- Arbitrary-precision Candid integers, validated principals, records, variants, optionals, vectors, blobs, and recursive type references.
+- `CandidConvertible` support for Swift primitive, optional, array, data, record, and explicit variant models.
+- Typed `query`, `call`, `queryCandid`, and `callCandid` APIs built on the existing verified raw transport.
+
+### Compatibility
+
+- `queryRaw`, `unsafeQueryRaw`, and `callRaw` remain available without behavior changes.
+- Typed Candid APIs can be adopted incrementally alongside existing generated bindings and raw payloads.
+
 ## [0.4.0] - 2026-09-04
 
 ### Added
