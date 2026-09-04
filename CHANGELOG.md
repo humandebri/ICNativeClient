@@ -2,7 +2,11 @@
 
 All notable changes are documented here.
 
-## [Unreleased]
+## [0.7.2] - 2026-09-05
+
+### Fixed
+
+- Strict CBOR decoding accepts indefinite-length byte strings, text strings, arrays, and maps while retaining nesting, collection, UTF-8, and duplicate-key validation.
 
 ## [0.7.1] - 2026-09-04
 

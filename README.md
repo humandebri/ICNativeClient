@@ -1,6 +1,6 @@
 # ICNativeClient
 
-ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.1 adds effective routing IDs to verified queries and supports binding generation directly from Xcode project targets.
+ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.2 accepts valid indefinite-length CBOR responses while retaining strict validation limits.
 
 It includes principal/account helpers, a Candid DIDL codec, explicit Swift model conversion, and raw Candid-byte transport.
 
@@ -287,6 +287,10 @@ let sharedStore = ICIdentityStore(
 ```
 
 Every participating target must include that access group in its Keychain Sharing entitlement. ICNativeClient does not migrate items between access groups or from application-specific storage formats. If the shared item is initially absent, authenticate and save the session from the main application before an extension attempts to load it. An invalid access group or missing entitlement is reported as `ICClientError.keychainFailure`.
+
+## New in 0.7.2
+
+0.7.2 is a backward-compatible patch release. The strict CBOR decoder now accepts valid indefinite-length byte strings, text strings, arrays, and maps while continuing to enforce UTF-8 validity, nesting and collection limits, and unique map keys.
 
 ## New in 0.7.1
 
