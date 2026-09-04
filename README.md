@@ -1,6 +1,6 @@
 # ICNativeClient
 
-ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.5.0 adds typed Candid encoding, decoding, and verified calls while retaining the raw transport APIs introduced in 0.4.0.
+ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.6.0 adds shared Keychain sessions, explicit authentication target scopes, configurable network polling, and typed Candid null values.
 
 It includes principal/account helpers, a Candid DIDL codec, explicit Swift model conversion, and raw Candid-byte transport.
 
@@ -227,6 +227,10 @@ let sharedStore = ICIdentityStore(
 ```
 
 Every participating target must include that access group in its Keychain Sharing entitlement. ICNativeClient does not migrate items between access groups or from application-specific storage formats. If the shared item is initially absent, authenticate and save the session from the main application before an extension attempts to load it. An invalid access group or missing entitlement is reported as `ICClientError.keychainFailure`.
+
+## New in 0.6.0
+
+0.6.0 is a backward-compatible feature release. Existing clients retain unscoped relying-party authentication, a 20-second request timeout, one-second polling, 30 polling attempts, and application-local Keychain storage unless the new options are explicitly supplied.
 
 ## New in 0.5.0
 

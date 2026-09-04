@@ -4,6 +4,8 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-04
+
 ### Added
 
 - Optional Keychain access-group selection for sharing `ICIdentityStore` sessions between an application and its extensions.
