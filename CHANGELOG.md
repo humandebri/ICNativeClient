@@ -4,6 +4,22 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-04
+
+### Added
+
+- Effective routing canister IDs on raw, Candid, and typed query APIs and generated query wrappers.
+- Direct `XcodeBuildToolPlugin` support for generating bindings in Xcode project targets.
+
+### Fixed
+
+- Management-canister queries preserve `aaaaa-aa` in signed request content while using the target canister for HTTP routing, subnet discovery, and certificate range verification.
+- Bindgen plugin fixtures resolve the local ICNativeClient package independently of the checkout directory name.
+
+### Compatibility
+
+- ICNativeClient 0.7.1 retains the existing default query behavior when no effective canister ID is supplied. The bundled generator is versioned independently as `ic-candid-swift-bindgen` 0.1.1.
+
 ## [0.7.0] - 2026-09-04
 
 ### Added
