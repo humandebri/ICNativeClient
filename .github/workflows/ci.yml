@@ -1,10 +1,8 @@
-name: Swift
+name: CI
 
 on:
-  pull_request:
   push:
-    branches:
-      - main
+  pull_request:
 
 permissions:
   contents: read
@@ -14,14 +12,16 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
-      - name: Run package tests
+      - name: Unit tests
         run: swift test
+      - name: Swift 6 strict concurrency
+        run: swift build -Xswiftc -swift-version -Xswiftc 6 -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
 
   ios:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
-      - name: Run iOS tests
+      - name: Run iOS Simulator tests
         run: |
           simulator_id="$(
             xcrun simctl list devices available -j |
@@ -29,4 +29,5 @@ jobs:
           )"
           xcodebuild test \
             -scheme ICNativeClient \
-            -destination "platform=iOS Simulator,id=${simulator_id}"
+            -destination "platform=iOS Simulator,id=${simulator_id}" \
+            CODE_SIGNING_ALLOWED=NO

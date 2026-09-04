@@ -1,9 +1,10 @@
-// Minimal CBOR support for IC request envelopes and boundary-node responses.
-// This intentionally supports only the CBOR shapes used by IC query/call/read_state.
-
 import Foundation
 
 public enum ICCBOR {
+    public static let selfDescribeTag: UInt64 = 55_799
+    public static let defaultMaximumDepth = 64
+    public static let defaultMaximumCollectionCount = 100_000
+
     public indirect enum Value: Equatable, Sendable {
         case text(String)
         case bytes(Data)
@@ -14,20 +15,14 @@ public enum ICCBOR {
 
         public static func == (lhs: Value, rhs: Value) -> Bool {
             switch (lhs, rhs) {
-            case (.text(let left), .text(let right)):
-                return left == right
-            case (.bytes(let left), .bytes(let right)):
-                return left == right
-            case (.unsigned(let left), .unsigned(let right)):
-                return left == right
-            case (.array(let left), .array(let right)):
-                return left == right
-            case (.map(let left), .map(let right)):
-                return left.elementsEqual(right) { $0.0 == $1.0 && $0.1 == $1.1 }
-            case (.tagged(let leftTag, let leftValue), .tagged(let rightTag, let rightValue)):
-                return leftTag == rightTag && leftValue == rightValue
-            default:
-                return false
+            case (.text(let a), .text(let b)): a == b
+            case (.bytes(let a), .bytes(let b)): a == b
+            case (.unsigned(let a), .unsigned(let b)): a == b
+            case (.array(let a), .array(let b)): a == b
+            case (.map(let a), .map(let b)):
+                a.elementsEqual(b) { $0.0 == $1.0 && $0.1 == $1.1 }
+            case (.tagged(let at, let av), .tagged(let bt, let bv)): at == bt && av == bv
+            default: false
             }
         }
     }
@@ -38,9 +33,28 @@ public enum ICCBOR {
         return data
     }
 
+    /// Strictly decodes exactly one supported CBOR value.
+    public static func decodeStrict(
+        _ data: Data,
+        maximumDepth: Int = defaultMaximumDepth,
+        maximumCollectionCount: Int = defaultMaximumCollectionCount
+    ) throws -> Value {
+        guard maximumDepth > 0, maximumCollectionCount > 0 else {
+            throw ICClientError.invalidCBOR("invalid decoder limits")
+        }
+        var reader = Reader(
+            data: data,
+            maximumDepth: maximumDepth,
+            maximumCollectionCount: maximumCollectionCount
+        )
+        let value = try reader.read(depth: 0)
+        guard reader.isAtEnd else { throw ICClientError.invalidCBOR("trailing data") }
+        return value
+    }
+
+    /// Compatibility helper. Security-sensitive paths use `decodeStrict` directly.
     public static func decode(_ data: Data) -> Value? {
-        var reader = Reader(data: data)
-        return reader.read()
+        try? decodeStrict(data)
     }
 
     public static func queryEnvelope(
@@ -57,7 +71,7 @@ public enum ICCBOR {
             (.text("sender"), .bytes(Data([0x04]))),
             (.text("ingress_expiry"), .unsigned(ingressExpiry)),
         ])
-        return encode(.map([(.text("content"), content)]))
+        return encode(.tagged(selfDescribeTag, .map([(.text("content"), content)])))
     }
 
     public static func signedEnvelope(
@@ -66,138 +80,61 @@ public enum ICCBOR {
         signature: Data,
         delegation: ICDelegationChain
     ) -> Data {
-        let cborDelegations = delegation.delegations.map { signed -> Value in
-            var delegationMap: [(Value, Value)] = [
+        let delegations = delegation.delegations.map { signed -> Value in
+            var fields: [(Value, Value)] = [
                 (.text("pubkey"), .bytes(signed.delegation.publicKey)),
                 (.text("expiration"), .unsigned(signed.delegation.expiration)),
             ]
             if let targets = signed.delegation.targets {
-                delegationMap.append((.text("targets"), .array(targets.map(Value.bytes))))
+                fields.append((.text("targets"), .array(targets.map(Value.bytes))))
+            }
+            if let permissions = signed.delegation.permissions {
+                fields.append((.text("permissions"), .text(permissions.rawValue)))
             }
             return .map([
-                (.text("delegation"), .map(delegationMap)),
+                (.text("delegation"), .map(fields)),
                 (.text("signature"), .bytes(signed.signature)),
             ])
         }
-        return encode(.map([
+        return encode(.tagged(selfDescribeTag, .map([
             (.text("content"), content),
             (.text("sender_pubkey"), .bytes(publicKey)),
             (.text("sender_sig"), .bytes(signature)),
-            (.text("sender_delegation"), .array(cborDelegations)),
-        ]))
-    }
-
-    public static func decodeReplyArg(_ data: Data) -> Data? {
-        var reader = Reader(data: data)
-        let value = reader.read()
-        let untagged = unwrapTag(value)
-        guard case .map(let top)? = untagged else { return nil }
-        for (key, value) in top {
-            if key == .text("reply"), case .map(let reply) = value {
-                for (replyKey, replyValue) in reply where replyKey == .text("arg") {
-                    if case .bytes(let arg) = replyValue {
-                        return arg
-                    }
-                }
-            }
-        }
-        return nil
-    }
-
-    public static func decodeRejectMessage(_ data: Data) -> String? {
-        guard case .map(let top)? = unwrapTag(decode(data)),
-              top.contains(where: { $0.0 == .text("status") && $0.1 == .text("rejected") }) else {
-            return nil
-        }
-        for (key, value) in top where key == .text("reject_message") {
-            switch value {
-            case .text(let message):
-                return message
-            case .bytes(let data):
-                return String(data: data, encoding: .utf8)
-            default:
-                return nil
-            }
-        }
-        return "IC request rejected."
-    }
-
-    public static func certificateStatusArg(from readStateData: Data, requestId: Data) throws -> Result<Data?, Error>? {
-        guard case .bytes(let certificateData)? = mapValue(readStateData, key: "certificate"),
-              case .map(let certificate)? = unwrapTag(decode(certificateData)),
-              let tree = certificate.first(where: { $0.0 == .text("tree") })?.1 else {
-            throw ICClientError.invalidResponse("read_state certificate")
-        }
-        // This mirrors the extracted app behavior: read_state is trusted
-        // as an update-completion signal and BLS certificate verification is not
-        // performed here. Callers that need certified reads must add verification.
-        return certificateStatusArg(fromCertificateTree: tree, requestId: requestId)
-    }
-
-    public static func certificateStatusArg(fromCertificateTree tree: Value, requestId: Data) -> Result<Data?, Error>? {
-        guard case .array = tree else {
-            return nil
-        }
-
-        let statusPath = [Data("request_status".utf8), requestId, Data("status".utf8)]
-        guard let statusData = lookup(statusPath, in: tree),
-              let status = String(data: statusData, encoding: .utf8) else {
-            return .success(nil)
-        }
-        switch status {
-        case "replied":
-            let replyPath = [Data("request_status".utf8), requestId, Data("reply".utf8)]
-            return .success(lookup(replyPath, in: tree))
-        case "received", "processing", "unknown":
-            return .success(nil)
-        case "rejected":
-            let messagePath = [Data("request_status".utf8), requestId, Data("reject_message".utf8)]
-            let message = lookup(messagePath, in: tree).flatMap { String(data: $0, encoding: .utf8) } ?? "IC update rejected."
-            return .failure(ICClientError.rejected(message))
-        default:
-            return .failure(ICClientError.invalidResponse("read_state request status"))
-        }
+            (.text("sender_delegation"), .array(delegations)),
+        ])))
     }
 
     public static func mapValue(_ data: Data, key: String) -> Value? {
-        guard let value = decode(data) else { return nil }
+        guard let value = try? decodeStrict(data) else { return nil }
         return mapValue(value, key: key)
     }
 
     public static func mapValue(_ value: Value, key: String) -> Value? {
-        guard case .map(let values) = unwrapTag(value) else { return nil }
+        guard case .map(let values) = unwrapSelfDescribeTag(value) else { return nil }
         return values.first { $0.0 == .text(key) }?.1
     }
 
-    public static func lookup(_ path: [Data], in tree: Value) -> Data? {
-        switch tree {
-        case .tagged(_, let value):
-            return lookup(path, in: value)
-        case .array(let values):
-            guard let nodeType = values.first else { return nil }
-            switch nodeType {
-            case .unsigned(1):
-                guard values.count == 3 else { return nil }
-                return lookup(path, in: values[1]) ?? lookup(path, in: values[2])
-            case .unsigned(2):
-                guard values.count == 3, case .bytes(let label) = values[1], path.first == label else { return nil }
-                return lookup(Array(path.dropFirst()), in: values[2])
-            case .unsigned(3):
-                guard path.isEmpty, values.count == 2, case .bytes(let data) = values[1] else { return nil }
-                return data
-            default:
-                return nil
-            }
-        default:
-            return nil
+    static func requiredMap(_ value: Value, context: String) throws -> [(Value, Value)] {
+        guard case .map(let fields) = unwrapSelfDescribeTag(value) else {
+            throw ICClientError.invalidResponse(context)
         }
+        return fields
     }
 
-    private static func unwrapTag(_ value: Value?) -> Value? {
-        guard case .tagged(_, let nested)? = value else {
-            return value
+    static func requiredValue(_ fields: [(Value, Value)], key: String, context: String) throws -> Value {
+        guard let value = fields.first(where: { $0.0 == .text(key) })?.1 else {
+            throw ICClientError.invalidResponse("\(context).\(key)")
         }
-        return unwrapTag(nested)
+        return value
+    }
+
+    static func optionalValue(_ fields: [(Value, Value)], key: String) -> Value? {
+        fields.first(where: { $0.0 == .text(key) })?.1
+    }
+
+    static func unwrapSelfDescribeTag(_ value: Value) -> Value {
+        if case .tagged(selfDescribeTag, let nested) = value { return nested }
+        return value
     }
 
     private static func append(_ value: Value, to data: inout Data) {
@@ -209,17 +146,13 @@ public enum ICCBOR {
         case .bytes(let bytes):
             appendHeader(2, count: UInt64(bytes.count), to: &data)
             data.append(bytes)
-        case .unsigned(let value):
-            appendHeader(0, count: value, to: &data)
+        case .unsigned(let value): appendHeader(0, count: value, to: &data)
         case .array(let values):
             appendHeader(4, count: UInt64(values.count), to: &data)
             values.forEach { append($0, to: &data) }
         case .map(let values):
             appendHeader(5, count: UInt64(values.count), to: &data)
-            values.forEach {
-                append($0.0, to: &data)
-                append($0.1, to: &data)
-            }
+            values.forEach { append($0.0, to: &data); append($0.1, to: &data) }
         case .tagged(let tag, let value):
             appendHeader(6, count: tag, to: &data)
             append(value, to: &data)
@@ -229,138 +162,121 @@ public enum ICCBOR {
     private static func appendHeader(_ major: UInt8, count: UInt64, to data: inout Data) {
         let base = major << 5
         switch count {
-        case 0..<24:
-            data.append(base | UInt8(count))
+        case 0..<24: data.append(base | UInt8(count))
         case 24...UInt64(UInt8.max):
-            data.append(base | 24)
-            data.append(UInt8(count))
+            data.append(base | 24); data.append(UInt8(count))
         case 256...UInt64(UInt16.max):
-            data.append(base | 25)
-            data.append(contentsOf: UInt16(count).bigEndianBytes)
+            data.append(base | 25); data.append(contentsOf: UInt16(count).bigEndianBytes)
         case 65_536...UInt64(UInt32.max):
-            data.append(base | 26)
-            data.append(contentsOf: UInt32(count).bigEndianBytes)
+            data.append(base | 26); data.append(contentsOf: UInt32(count).bigEndianBytes)
         default:
-            data.append(base | 27)
-            data.append(contentsOf: count.bigEndianBytes)
+            data.append(base | 27); data.append(contentsOf: count.bigEndianBytes)
         }
     }
 
     private struct Reader {
-        var data: Data
+        let data: Data
+        let maximumDepth: Int
+        let maximumCollectionCount: Int
         var index = 0
 
-        mutating func read() -> Value? {
-            guard index < data.count else { return nil }
-            let first = data[data.index(data.startIndex, offsetBy: index)]
-            index += 1
+        var isAtEnd: Bool { index == data.count }
+
+        mutating func read(depth: Int) throws -> Value {
+            guard depth < maximumDepth else { throw ICClientError.invalidCBOR("maximum nesting depth exceeded") }
+            let first = try readByte()
             let major = first >> 5
             let info = first & 0x1f
-            if info == 31 {
-                return readIndefinite(major: major)
-            }
-            guard let count = readCount(info) else { return nil }
+            guard info != 31 else { throw ICClientError.invalidCBOR("indefinite-length values are unsupported") }
+            let count = try readCount(info)
             switch major {
-            case 0:
-                return .unsigned(count)
+            case 0: return .unsigned(count)
             case 2:
-                guard count <= UInt64(Int.max) else { return nil }
-                guard let bytes = readData(Int(count)) else { return nil }
-                return .bytes(bytes)
+                return .bytes(try readData(count))
             case 3:
-                guard count <= UInt64(Int.max) else { return nil }
-                guard let bytes = readData(Int(count)), let text = String(data: bytes, encoding: .utf8) else { return nil }
+                let bytes = try readData(count)
+                guard let text = String(data: bytes, encoding: .utf8) else { throw ICClientError.invalidCBOR("invalid UTF-8") }
                 return .text(text)
             case 4:
+                let size = try checkedCollectionCount(count)
                 var values: [Value] = []
-                for _ in 0..<count {
-                    guard let value = read() else { return nil }
-                    values.append(value)
-                }
+                values.reserveCapacity(size)
+                for _ in 0..<size { values.append(try read(depth: depth + 1)) }
                 return .array(values)
             case 5:
+                let size = try checkedCollectionCount(count)
                 var values: [(Value, Value)] = []
-                for _ in 0..<count {
-                    guard let key = read(), let value = read() else { return nil }
-                    values.append((key, value))
+                values.reserveCapacity(size)
+                var encodedKeys = Set<Data>()
+                encodedKeys.reserveCapacity(size)
+                for _ in 0..<size {
+                    let keyStart = index
+                    let key = try read(depth: depth + 1)
+                    let encodedKey = data.subdata(in: keyStart..<index)
+                    guard encodedKeys.insert(encodedKey).inserted else {
+                        throw ICClientError.invalidCBOR("duplicate map key")
+                    }
+                    values.append((key, try read(depth: depth + 1)))
                 }
                 return .map(values)
             case 6:
-                guard let value = read() else { return nil }
-                return .tagged(count, value)
+                guard count == selfDescribeTag else { throw ICClientError.invalidCBOR("unsupported semantic tag \(count)") }
+                return .tagged(count, try read(depth: depth + 1))
             default:
-                return nil
+                throw ICClientError.invalidCBOR("unsupported CBOR major type \(major)")
             }
         }
 
-        private mutating func readIndefinite(major: UInt8) -> Value? {
-            switch major {
-            case 4:
-                var values: [Value] = []
-                while !isBreak() {
-                    guard let value = read() else { return nil }
-                    values.append(value)
-                }
-                index += 1
-                return .array(values)
-            case 5:
-                var values: [(Value, Value)] = []
-                while !isBreak() {
-                    guard let key = read(), let value = read() else { return nil }
-                    values.append((key, value))
-                }
-                index += 1
-                return .map(values)
-            default:
-                return nil
-            }
-        }
-
-        private func isBreak() -> Bool {
-            index < data.count && data[data.index(data.startIndex, offsetBy: index)] == 0xff
-        }
-
-        private mutating func readCount(_ info: UInt8) -> UInt64? {
+        private mutating func readCount(_ info: UInt8) throws -> UInt64 {
             switch info {
-            case 0..<24:
-                return UInt64(info)
+            case 0..<24: return UInt64(info)
             case 24:
-                guard let value = readUInt8() else { return nil }
-                return UInt64(value)
+                let value = UInt64(try readByte())
+                guard value >= 24 else { throw ICClientError.invalidCBOR("non-canonical integer") }
+                return value
             case 25:
-                return readInteger(byteCount: 2)
+                let value = try readInteger(byteCount: 2)
+                guard value > UInt8.max else { throw ICClientError.invalidCBOR("non-canonical integer") }
+                return value
             case 26:
-                return readInteger(byteCount: 4)
+                let value = try readInteger(byteCount: 4)
+                guard value > UInt16.max else { throw ICClientError.invalidCBOR("non-canonical integer") }
+                return value
             case 27:
-                return readInteger(byteCount: 8)
-            default:
-                return nil
+                let value = try readInteger(byteCount: 8)
+                guard value > UInt32.max else { throw ICClientError.invalidCBOR("non-canonical integer") }
+                return value
+            default: throw ICClientError.invalidCBOR("invalid additional information")
             }
         }
 
-        private mutating func readUInt8() -> UInt8? {
-            guard index < data.count else { return nil }
+        private func checkedCollectionCount(_ count: UInt64) throws -> Int {
+            guard count <= UInt64(maximumCollectionCount), count <= UInt64(Int.max) else {
+                throw ICClientError.invalidCBOR("collection limit exceeded")
+            }
+            return Int(count)
+        }
+
+        private mutating func readByte() throws -> UInt8 {
+            guard index < data.count else { throw ICClientError.invalidCBOR("unexpected end of input") }
             defer { index += 1 }
             return data[data.index(data.startIndex, offsetBy: index)]
         }
 
-        private mutating func readInteger(byteCount: Int) -> UInt64? {
-            guard index + byteCount <= data.count else { return nil }
-            var value: UInt64 = 0
-            let start = data.index(data.startIndex, offsetBy: index)
-            let end = data.index(start, offsetBy: byteCount)
-            for byte in data[start..<end] {
-                value = (value << 8) | UInt64(byte)
-            }
-            index += byteCount
-            return value
+        private mutating func readInteger(byteCount: Int) throws -> UInt64 {
+            guard byteCount <= data.count - index else { throw ICClientError.invalidCBOR("unexpected end of integer") }
+            var result: UInt64 = 0
+            for _ in 0..<byteCount { result = (result << 8) | UInt64(try readByte()) }
+            return result
         }
 
-        private mutating func readData(_ count: Int) -> Data? {
-            guard index + count <= data.count else { return nil }
+        private mutating func readData(_ count: UInt64) throws -> Data {
+            guard count <= UInt64(Int.max) else { throw ICClientError.invalidCBOR("byte string is too large") }
+            let length = Int(count)
+            guard length <= data.count - index else { throw ICClientError.invalidCBOR("unexpected end of byte string") }
             let start = data.index(data.startIndex, offsetBy: index)
-            let end = data.index(start, offsetBy: count)
-            defer { index += count }
+            let end = data.index(start, offsetBy: length)
+            index += length
             return Data(data[start..<end])
         }
     }

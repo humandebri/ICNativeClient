@@ -8,7 +8,9 @@ public enum ICPrincipal {
     private static let alphabet = Array("abcdefghijklmnopqrstuvwxyz234567")
 
     public static func parse(_ text: String) -> Data? {
+        guard !text.isEmpty, text.utf8.count <= 63 else { return nil }
         let cleaned = text.lowercased().filter { $0 != "-" }
+        guard !cleaned.isEmpty, cleaned.utf8.count <= 53 else { return nil }
         var buffer = 0
         var bits = 0
         var bytes = [UInt8]()
@@ -69,7 +71,7 @@ public enum ICPAccountIdentifier {
         guard let principal = ICPrincipal.parse(principalText) else {
             throw ICClientError.invalidResponse("Invalid principal.")
         }
-        return account(for: principal, subaccount: Data(repeating: 0, count: 32))
+        return try account(for: principal, subaccount: Data(repeating: 0, count: 32))
     }
 
     public static func account(for principalText: String, subaccountPrincipal: String) throws -> Data {
@@ -83,10 +85,13 @@ public enum ICPAccountIdentifier {
         }
         subaccount[0] = UInt8(subaccountOwner.count)
         subaccount.replaceSubrange(1..<(1 + subaccountOwner.count), with: subaccountOwner)
-        return account(for: principal, subaccount: subaccount)
+        return try account(for: principal, subaccount: subaccount)
     }
 
-    public static func account(for principal: Data, subaccount: Data) -> Data {
+    public static func account(for principal: Data, subaccount: Data) throws -> Data {
+        guard principal.count <= 29, subaccount.count == 32 else {
+            throw ICClientError.invalidResponse("Principal must be at most 29 bytes and subaccount must be exactly 32 bytes.")
+        }
         var payload = Data([0x0a])
         payload.append(Data("account-id".utf8))
         payload.append(principal)
@@ -117,6 +122,8 @@ public enum ICPAmount {
         guard !trimmed.isEmpty else { return nil }
         let parts = trimmed.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count <= 2,
+              !parts[0].isEmpty,
+              parts[0].utf8.allSatisfy({ $0 >= 0x30 && $0 <= 0x39 }),
               let whole = UInt64(parts[0]) else {
             return nil
         }
@@ -128,7 +135,8 @@ public enum ICPAmount {
         var fractionE8s: UInt64 = 0
         if parts.count == 2 {
             let fraction = parts[1]
-            guard fraction.count <= 8, fraction.allSatisfy(\.isNumber) else { return nil }
+            guard fraction.count <= 8,
+                  fraction.utf8.allSatisfy({ $0 >= 0x30 && $0 <= 0x39 }) else { return nil }
             let padded = String(fraction) + String(repeating: "0", count: 8 - fraction.count)
             fractionE8s = UInt64(padded) ?? 0
         }
