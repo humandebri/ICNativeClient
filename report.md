@@ -33,12 +33,14 @@
 | F-006 Keychain save が旧値を先に削除し load 障害を隠す | P1 | `ICIdentityStore` | RESOLVED | update-first保存、失敗時の旧値保持、未登録以外の読込障害throwを実装 |
 | F-007 URL force unwrap と入力境界不足 | P2 | `Configuration`、authenticator、`Primitives`、`poll` | RESOLVED | throwing validationと上限検査を追加 |
 | F-008 OSS公開物とCIが不足する | P1 | リポジトリ直下・`.github` | RESOLVED | LICENSE、notice、security、contribution、CIを追加 |
+| F-009 公開0.3.0の認証制御が未統合 | P1 | `ICInternetIdentityAuthenticator` | RESOLVED | 330秒timeout、Task cancellation、明示callback path、shared/ephemeral browser選択、base64 URL transportを0.4.0へ統合 |
 
 ## 検証結果
 
-- `qrun -- swift test --disable-sandbox`: PASS（30 tests、0 failures）
+- `qrun -- swift test --disable-sandbox`: PASS（31 macOS tests、0 failures）
 - `qrun -- swift build -Xswiftc -swift-version -Xswiftc 6 -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors`: PASS
 - `xcodebuild -scheme ICNativeClient -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build`: PASS
+- 実iOS Simulator上の `xcodebuild test`: PASS（0.3.0由来のiOS CI経路を再現）
 - BLS 100回検証: 約0.08秒（ローカルdebug test、環境依存）
 - 同一subnetの連続query: certified key取得1回。署名失敗時: 強制再取得1回で停止。PASS
 - ICRC-167 Ed25519/canister signature、一段・二段chain、8時間既定TTL・明示指定最大30日をunit testで確認済み
@@ -55,4 +57,3 @@
 ## リポジトリ外の手動作業
 
 - 公開前にGitHubの **Private Vulnerability Reporting** を有効化し、報告導線を確認する。
-- commit、push、tag、GitHub Release は本対応に含めない。

@@ -1,6 +1,6 @@
 # ICNativeClient
 
-ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.2.0 makes response verification the default and provides direct ICRC-167 Internet Identity authentication on iOS 17.4 or newer.
+ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.4.0 makes response verification the default and provides direct ICRC-167 Internet Identity authentication on iOS 17.4 or newer.
 
 It includes principal/account helpers and raw Candid-byte transport; it does not include a general Candid codec.
 
@@ -85,7 +85,22 @@ let authenticator = try ICInternetIdentityAuthenticator(
     configuration: configuration,
     callbackURL: callbackURL
 )
-let identity = try await authenticator.authenticate()
+let identity = try await authenticator.authenticate(
+    timeout: .seconds(330),
+    prefersEphemeralWebBrowserSession: false
+)
+```
+
+Authorization times out after 330 seconds by default and throws `ICClientError.authorizationTimedOut`. Cancelling the calling task cancels the active browser session. The shared browser session remains the default so passkeys and existing Internet Identity sessions are available; use an ephemeral session only for an intentional clean-session flow.
+
+The 0.3.0 domain/path initializer remains available and requires an explicit path:
+
+```swift
+let authenticator = try ICInternetIdentityAuthenticator(
+    configuration: configuration,
+    callbackDomain: "example.com",
+    callbackPath: "/ios-auth-callback"
+)
 ```
 
 The callback origin must publish its exact callback declaration and Apple association file. Add `webcredentials:example.com` to Associated Domains. Add `applinks:example.com` only when the application also handles ordinary Universal Links; it is not a replacement for the web-credentials association used by this authentication session. Test association behavior on a physical device because Apple caches AASA data.
@@ -106,11 +121,11 @@ try store.save(identity)
 let restored = try store.load() // nil only when no item is registered
 ```
 
-Saving updates an existing item first and adds only when absent, so an update failure does not delete the prior session. Keychain failures are thrown; legacy or malformed session data is deleted and returns `nil` so the app can reauthenticate.
+Saving updates an existing item first and adds only when absent, so an update failure does not delete the prior session. Keychain failures and malformed legacy data are thrown without deleting stored bytes; only an absent item returns `nil`.
 
-## Migration from 0.1.x
+## Migration to 0.4.0
 
-0.2.0 intentionally prioritizes verification over source compatibility:
+0.4.0 intentionally prioritizes verification over source compatibility while retaining 0.3.0 authorization timeout, cancellation, explicit callback-path, and browser-session controls:
 
 - Add `try` to `ICClientConfiguration` construction.
 - Rename `identityProvider` to `internetIdentityURL`.
@@ -122,7 +137,7 @@ Saving updates an existing item first and adds only when absent, so an update fa
 
 ## Security and contribution
 
-See [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). GitHub Private Vulnerability Reporting must be enabled manually after repository publication.
+See [SECURITY.md](SECURITY.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). GitHub Private Vulnerability Reporting must be enabled and tested before repository publication.
 
 ## License
 

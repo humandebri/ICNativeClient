@@ -14,6 +14,31 @@ final class ICNativeClientTests: XCTestCase {
         super.tearDown()
     }
 
+    func testAuthorizationTimedOutDescriptionIsRetryable() {
+        XCTAssertEqual(
+            ICClientError.authorizationTimedOut.errorDescription,
+            "Internet Identity authorization timed out. Please try again."
+        )
+    }
+
+#if canImport(UIKit)
+    @available(iOS 17.4, *)
+    func testAuthenticatorRetainsExplicitCallbackAndTimeoutAPI() throws {
+        XCTAssertEqual(ICInternetIdentityAuthenticator.defaultAuthorizationTimeout, .seconds(330))
+        XCTAssertEqual(
+            try ICInternetIdentityAuthenticator.callbackURL(
+                callbackDomain: "app.example.com",
+                callbackPath: "/native-auth-callback"
+            ).absoluteString,
+            "https://app.example.com/native-auth-callback"
+        )
+        XCTAssertThrowsError(try ICInternetIdentityAuthenticator.callbackURL(
+            callbackDomain: "app.example.com",
+            callbackPath: "native-auth-callback"
+        ))
+    }
+#endif
+
     func testConfigurationValidatesInputsAndDefaultsToEightHours() throws {
         let config = try configuration(root: BLSTKey(seed: 1).derPublicKey)
         XCTAssertEqual(config.delegationTTLNanoseconds, 28_800_000_000_000)
@@ -666,6 +691,8 @@ final class ICNativeClientTests: XCTestCase {
             XCTAssertThrowsError(try ICRC167Codec.validateReturnedCallbackURL(URL(string: raw)!, expected: expected))
         }
         XCTAssertThrowsError(try ICRC167Codec.validateCallbackURL(URL(string: "https://app.example/ios-auth-callback#old")!))
+        XCTAssertNoThrow(try ICRC167Codec.validateCallbackURL(URL(string: "https://app.example/native-auth-callback")!))
+        XCTAssertThrowsError(try ICRC167Codec.validateCallbackURL(URL(string: "https://app.example")!))
     }
 
     func testICRC167RejectsFragmentStateIDSchemaAndReplayFailures() throws {

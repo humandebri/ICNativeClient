@@ -205,11 +205,13 @@ enum ICRC167Codec {
               components.host != nil,
               components.user == nil,
               components.password == nil,
-              components.percentEncodedPath == callbackPath,
+              !components.percentEncodedPath.isEmpty,
+              components.percentEncodedPath.hasPrefix("/"),
+              !components.percentEncodedPath.hasPrefix("//"),
               components.percentEncodedQuery == nil,
               components.percentEncodedFragment == nil else {
             throw ICClientError.invalidConfiguration(
-                "Callback URL must be an HTTPS /ios-auth-callback URL without credentials, query, or fragment."
+                "Callback URL must be an HTTPS URL with an explicit path and without credentials, query, or fragment."
             )
         }
     }

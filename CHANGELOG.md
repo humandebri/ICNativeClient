@@ -4,7 +4,7 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-04
+## [0.4.0] - 2026-09-04
 
 ### Added
 
@@ -12,6 +12,7 @@ All notable changes are documented here.
 - Verified query node signatures with a one-hour certified subnet-key cache.
 - Strict CBOR parsing, response-size limits, structured rejects, and ICRC-167 native authentication.
 - OSS governance, security, third-party notice, and CI files.
+- The 0.3.0 authorization timeout, task cancellation, explicit callback path, shared/ephemeral browser selection, and safe base64 URL transport.
 
 ### Changed
 

@@ -22,6 +22,12 @@ expiration, targets, permissions, cycle/depth/target limits, and content caniste
 before returning an `ICAuthSession`. The default lifetime is 8 hours; callers may
 explicitly request a longer lifetime up to 30 days.
 
+Authentication itself has a separate 330-second default timeout. Cancelling the calling
+task cancels the active browser session. Shared browser state is used by default so
+passkeys and existing II sessions remain available; callers may explicitly request an
+ephemeral browser session for clean-session testing. Both the `callbackURL` initializer
+and the domain/path initializer require an explicit HTTPS callback path.
+
 ## Callback origin contract
 
 Before distributing an app build, the callback origin must serve all three resources:
