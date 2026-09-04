@@ -14,7 +14,21 @@ let package = Package(
         .library(name: "ICNativeClient", targets: ["ICNativeClient"]),
     ],
     targets: [
-        .target(name: "ICNativeClient"),
-        .testTarget(name: "ICNativeClientTests", dependencies: ["ICNativeClient"]),
+        .target(
+            name: "CBlst",
+            path: "Vendor/blst",
+            sources: ["src/server.c", "build/assembly.S"],
+            publicHeadersPath: "bindings",
+            cSettings: [
+                .headerSearchPath("src"),
+                .define("__BLST_PORTABLE__", .when(platforms: [.iOS], configuration: .debug)),
+            ]
+        ),
+        .target(name: "ICNativeClient", dependencies: ["CBlst"]),
+        .testTarget(
+            name: "ICNativeClientTests",
+            dependencies: ["ICNativeClient", "CBlst"],
+            resources: [.copy("Fixtures")]
+        ),
     ]
 )
