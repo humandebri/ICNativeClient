@@ -2,7 +2,7 @@
 
 ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.4.0 makes response verification the default and provides direct ICRC-167 Internet Identity authentication on iOS 17.4 or newer.
 
-It includes principal/account helpers and raw Candid-byte transport. Use the raw APIs with a generated Candid binding until a canister-specific Swift model is available.
+It includes principal/account helpers, a Candid DIDL codec, explicit Swift model conversion, and raw Candid-byte transport.
 
 ## Requirements and installation
 
@@ -48,6 +48,68 @@ The package never fetches a mainnet trust root from `/api/v2/status`. A root key
 Certificates and query timestamps are accepted only within five minutes of the local clock. HTTP bodies are streamed and aborted above 10 MiB by default; `maximumResponseBytes` can set a smaller positive limit.
 
 ## Query and update calls
+
+Use `CandidConvertible` values for ordinary typed calls. The typed APIs encode arguments, call the existing verified raw transport, and decode the Candid reply:
+
+```swift
+let greeting: String = try await client.query(
+    method: "greet",
+    argument: "Ada"
+)
+
+let result: UInt64 = try await client.call(
+    method: "increment",
+    argument: UInt64(1),
+    identity: identity
+)
+```
+
+`CandidArguments` and `CandidReply` preserve Candid's positional multi-value boundary. Composite values carry their declared type, so an absent optional and an empty vector remain unambiguous:
+
+```swift
+let arguments = CandidArguments([
+    try CandidTypedValue(type: .optional(.text), value: .optional(.text, nil)),
+    try CandidTypedValue(type: .vector(.nat16), value: .vector(.nat16, [])),
+])
+let reply = try await client.queryCandid(method: "lookup", arguments: arguments)
+let (name, count) = try reply.decode(String.self, UInt64.self)
+```
+
+Canister-specific records implement `CandidConvertible` explicitly. This keeps the wire schema visible and avoids treating Swift's synthesized `Codable` enum representation as a Candid variant:
+
+```swift
+struct User: CandidConvertible {
+    let name: String
+    let age: UInt8
+
+    static let fields = [
+        CandidField("name", type: .text),
+        CandidField("age", type: .nat8),
+    ]
+    static let candidType = CandidType.record(fields)
+
+    init(candidValue: CandidValue) throws {
+        let record = try CandidRecord(candidValue)
+        name = try record.required("name")
+        age = try record.required("age")
+    }
+
+    var candidValue: CandidValue {
+        .record(Self.fields, [
+            Candid.fieldID("name"): name.candidValue,
+            Candid.fieldID("age"): age.candidValue,
+        ])
+    }
+}
+```
+
+`CandidNat` and `CandidInt` retain canonical decimal strings for arbitrary-precision values. `CandidPrincipal` validates principal text. Variants use `CandidVariant` with the complete declared case list, selected tag, and payload.
+
+`Data` and `[UInt8]` both map to Candid `vec nat8`. Recursive wire types are retained with `CandidType.recursive` and `CandidType.reference`; finite values can be decoded and re-encoded, while the configured nesting limit still rejects excessively deep values.
+
+Use `queryRaw` and `callRaw` when integrating generated bindings or Candid types not represented by this value API. `unsafeQueryRaw` remains the explicit unverified opt-out; there is intentionally no typed unsafe wrapper.
+
+### Raw transport
 
 ```swift
 let client = ICClient(configuration: configuration)

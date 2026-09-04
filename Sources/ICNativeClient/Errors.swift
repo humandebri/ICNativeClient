@@ -29,6 +29,7 @@ public enum ICClientError: Error, LocalizedError, Equatable {
     case emptyResponse
     case invalidResponse(String)
     case invalidCBOR(String)
+    case invalidCandid(String)
     case responseTooLarge(limit: Int)
     case certificateVerificationFailed(String)
     case querySignatureVerificationFailed(String)
@@ -60,6 +61,8 @@ public enum ICClientError: Error, LocalizedError, Equatable {
             return "The canister response could not be decoded: \(context)."
         case .invalidCBOR(let context):
             return "Invalid CBOR: \(context)."
+        case .invalidCandid(let context):
+            return "Invalid Candid: \(context)."
         case .responseTooLarge(let limit):
             return "The IC response exceeded the \(limit)-byte limit."
         case .certificateVerificationFailed(let context):

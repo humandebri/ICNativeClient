@@ -50,6 +50,53 @@ public final class ICClient: @unchecked Sendable {
         return try response.result()
     }
 
+    /// Performs a verified query with Candid arguments and decodes the returned DIDL value list.
+    public func queryCandid(
+        method: String,
+        arguments: CandidArguments = CandidArguments(),
+        canisterId: String? = nil,
+        identity: ICAuthSession? = nil
+    ) async throws -> CandidReply {
+        let bytes = try arguments.encode()
+        let reply = try await queryRaw(method: method, arg: bytes, canisterId: canisterId, identity: identity)
+        return try CandidDecoder().decode(reply)
+    }
+
+    public func query<Output: CandidConvertible>(
+        method: String,
+        arguments: CandidArguments = CandidArguments(),
+        canisterId: String? = nil,
+        identity: ICAuthSession? = nil,
+        as outputType: Output.Type = Output.self
+    ) async throws -> Output {
+        let reply = try await queryCandid(
+            method: method,
+            arguments: arguments,
+            canisterId: canisterId,
+            identity: identity
+        )
+        guard reply.values.count == 1 else {
+            throw ICClientError.invalidCandid("typed query expected one reply value, received \(reply.values.count)")
+        }
+        return try reply.decode(outputType)
+    }
+
+    public func query<Input: CandidConvertible, Output: CandidConvertible>(
+        method: String,
+        argument: Input,
+        canisterId: String? = nil,
+        identity: ICAuthSession? = nil,
+        as outputType: Output.Type = Output.self
+    ) async throws -> Output {
+        try await query(
+            method: method,
+            arguments: CandidArguments(argument),
+            canisterId: canisterId,
+            identity: identity,
+            as: outputType
+        )
+    }
+
     public func callRaw(
         method: String,
         arg: Data = Data(),
@@ -108,6 +155,64 @@ public final class ICClient: @unchecked Sendable {
         default:
             throw ICClientError.invalidResponse("unsupported v4 call status \(status)")
         }
+    }
+
+    /// Performs an update with Candid arguments using the same verified path as `callRaw`.
+    public func callCandid(
+        method: String,
+        arguments: CandidArguments = CandidArguments(),
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        identity: ICAuthSession
+    ) async throws -> CandidReply {
+        let bytes = try arguments.encode()
+        let reply = try await callRaw(
+            method: method,
+            arg: bytes,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            identity: identity
+        )
+        return try CandidDecoder().decode(reply)
+    }
+
+    public func call<Output: CandidConvertible>(
+        method: String,
+        arguments: CandidArguments = CandidArguments(),
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        identity: ICAuthSession,
+        as outputType: Output.Type = Output.self
+    ) async throws -> Output {
+        let reply = try await callCandid(
+            method: method,
+            arguments: arguments,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            identity: identity
+        )
+        guard reply.values.count == 1 else {
+            throw ICClientError.invalidCandid("typed call expected one reply value, received \(reply.values.count)")
+        }
+        return try reply.decode(outputType)
+    }
+
+    public func call<Input: CandidConvertible, Output: CandidConvertible>(
+        method: String,
+        argument: Input,
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        identity: ICAuthSession,
+        as outputType: Output.Type = Output.self
+    ) async throws -> Output {
+        try await call(
+            method: method,
+            arguments: CandidArguments(argument),
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            identity: identity,
+            as: outputType
+        )
     }
 
     public func poll(
