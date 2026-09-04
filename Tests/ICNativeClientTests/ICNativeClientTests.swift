@@ -464,6 +464,42 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertEqual(lock.withLock { readStateCount }, 1)
     }
 
+    func testCandidQueryUsesVerifiedRawTransportWithoutChangingArgumentBytes() async throws {
+        let root = BLSTKey(seed: 31)
+        let node = Curve25519.Signing.PrivateKey()
+        let nodeID = Data([0xcc])
+        let config = try configuration(root: root.derPublicKey)
+        let certificate = try makeSubnetCertificate(root: root, nodeID: nodeID, node: node, now: Date())
+        let expectedArgument = try CandidArguments("input").encode()
+        let encodedReply = try CandidArguments("typed reply").encode()
+        let lock = NSLock()
+        var sentArgument: Data?
+
+        URLProtocolStub.handler = { request in
+            if request.url?.path.hasSuffix("/read_state") == true {
+                return response(request, status: 200, body: readStateResponse(certificate))
+            }
+            let content = try requestContent(request)
+            guard case .bytes(let argument) = ICCBOR.mapValue(content, key: "arg") else {
+                throw ICClientError.invalidResponse("query arg")
+            }
+            lock.withLock { sentArgument = argument }
+            let requestID = ICRequestID.hash(of: content)
+            let timestamp = self.nanoseconds(Date())
+            let unsigned = queryResponse(arg: encodedReply, signatures: [])
+            let parsed = try ICQueryResponse(cbor: unsigned)
+            let signature = try node.signature(for: parsed.signable(requestID: requestID, timestamp: timestamp))
+            return response(request, status: 200, body: queryResponse(
+                arg: encodedReply,
+                signatures: [(nodeID, signature, timestamp)]
+            ))
+        }
+
+        let result: String = try await client(config).query(method: "typed", argument: "input")
+        XCTAssertEqual(result, "typed reply")
+        XCTAssertEqual(lock.withLock { sentArgument }, expectedArgument)
+    }
+
     func testQueryRejectsTamperedSignatureAndRefreshesOnlyOnce() async throws {
         let root = BLSTKey(seed: 12)
         let node = Curve25519.Signing.PrivateKey()
@@ -530,6 +566,58 @@ final class ICNativeClientTests: XCTestCase {
         }
         await XCTAssertThrowsErrorAsync(try await client(config).callRaw(method: "v2", identity: identity))
         _ = canister
+    }
+
+    func testCandidCallUsesVerifiedRawTransportWithoutChangingArgumentBytes() async throws {
+        let root = BLSTKey(seed: 32)
+        let config = try configuration(root: root.derPublicKey)
+        let identity = try makeAuthSession(config: config)
+        let expectedArgument = try CandidArguments(UInt64(7)).encode()
+        let encodedReply = try CandidArguments("updated").encode()
+        let lock = NSLock()
+        var sentArgument: Data?
+
+        URLProtocolStub.handler = { request in
+            let content = try requestContent(request)
+            guard case .bytes(let argument) = ICCBOR.mapValue(content, key: "arg") else {
+                throw ICClientError.invalidResponse("call arg")
+            }
+            lock.withLock { sentArgument = argument }
+            let requestID = ICRequestID.hash(of: content)
+            let base = [Data("request_status".utf8), requestID]
+            let certificate = try self.makeCertificate(leaves: [
+                ([Data("time".utf8)], ICRequestID.leb128(self.nanoseconds(Date()))),
+                (base + [Data("status".utf8)], Data("replied".utf8)),
+                (base + [Data("reply".utf8)], encodedReply),
+            ], key: root)
+            return response(request, status: 200, body: ICCBOR.encode(.map([
+                (.text("status"), .text("replied")),
+                (.text("certificate"), .bytes(certificate)),
+            ])))
+        }
+
+        let result: String = try await client(config).call(
+            method: "typed-update",
+            argument: UInt64(7),
+            identity: identity
+        )
+        XCTAssertEqual(result, "updated")
+        XCTAssertEqual(lock.withLock { sentArgument }, expectedArgument)
+
+        URLProtocolStub.handler = { request in response(request, status: 200, body: ICCBOR.encode(.map([
+            (.text("status"), .text("non_replicated_rejection")),
+            (.text("reject_code"), .unsigned(4)),
+            (.text("reject_message"), .text("typed reject")),
+        ]))) }
+        await XCTAssertThrowsErrorAsync(
+            try await client(config).callCandid(method: "typed-reject", identity: identity)
+        ) { error in
+            guard let clientError = error as? ICClientError,
+                  case .rejected(let reject) = clientError else {
+                return XCTFail("expected structured reject, received \(error)")
+            }
+            XCTAssertEqual(reject.message, "typed reject")
+        }
     }
 
     func testV4AcceptedPollsAndSurfacesCertifiedDone() async throws {
