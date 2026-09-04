@@ -33,6 +33,12 @@ public enum ICCBOR {
         return data
     }
 
+    private static func mapKeyIdentity(_ value: Value) -> Data {
+        var data = Data()
+        append(value, to: &data, sortingMapPairs: true)
+        return data
+    }
+
     /// Strictly decodes exactly one supported CBOR value.
     public static func decodeStrict(
         _ data: Data,
@@ -137,7 +143,11 @@ public enum ICCBOR {
         return value
     }
 
-    private static func append(_ value: Value, to data: inout Data) {
+    private static func append(
+        _ value: Value,
+        to data: inout Data,
+        sortingMapPairs: Bool = false
+    ) {
         switch value {
         case .text(let text):
             let bytes = Data(text.utf8)
@@ -149,13 +159,23 @@ public enum ICCBOR {
         case .unsigned(let value): appendHeader(0, count: value, to: &data)
         case .array(let values):
             appendHeader(4, count: UInt64(values.count), to: &data)
-            values.forEach { append($0, to: &data) }
+            values.forEach { append($0, to: &data, sortingMapPairs: sortingMapPairs) }
         case .map(let values):
             appendHeader(5, count: UInt64(values.count), to: &data)
-            values.forEach { append($0.0, to: &data); append($0.1, to: &data) }
+            if sortingMapPairs {
+                let encodedPairs = values.map { entry -> Data in
+                    var pair = Data()
+                    append(entry.0, to: &pair, sortingMapPairs: true)
+                    append(entry.1, to: &pair, sortingMapPairs: true)
+                    return pair
+                }.sorted { $0.lexicographicallyPrecedes($1) }
+                encodedPairs.forEach { data.append($0) }
+            } else {
+                values.forEach { append($0.0, to: &data); append($0.1, to: &data) }
+            }
         case .tagged(let tag, let value):
             appendHeader(6, count: tag, to: &data)
-            append(value, to: &data)
+            append(value, to: &data, sortingMapPairs: sortingMapPairs)
         }
     }
 
@@ -213,7 +233,7 @@ public enum ICCBOR {
                 canonicalKeys.reserveCapacity(size)
                 for _ in 0..<size {
                     let key = try read(depth: depth + 1)
-                    guard canonicalKeys.insert(ICCBOR.encode(key)).inserted else {
+                    guard canonicalKeys.insert(ICCBOR.mapKeyIdentity(key)).inserted else {
                         throw ICClientError.invalidCBOR("duplicate map key")
                     }
                     values.append((key, try read(depth: depth + 1)))
@@ -254,7 +274,7 @@ public enum ICCBOR {
                         throw ICClientError.invalidCBOR("collection limit exceeded")
                     }
                     let key = try read(depth: depth + 1)
-                    guard canonicalKeys.insert(ICCBOR.encode(key)).inserted else {
+                    guard canonicalKeys.insert(ICCBOR.mapKeyIdentity(key)).inserted else {
                         throw ICClientError.invalidCBOR("duplicate map key")
                     }
                     values.append((key, try read(depth: depth + 1)))

@@ -140,6 +140,16 @@ final class ICNativeClientTests: XCTestCase {
         ))
     }
 
+    func testCBORRejectsDuplicateMapKeysRegardlessOfPairOrder() throws {
+        let duplicateMapKeys: [UInt8] = [
+            0xa2,
+            0xa2, 0x61, 0x61, 0x01, 0x61, 0x62, 0x02, 0x00,
+            0xbf, 0x61, 0x62, 0x02, 0x61, 0x61, 0x01, 0xff, 0x01,
+        ]
+        XCTAssertThrowsError(try ICCBOR.decodeStrict(Data(duplicateMapKeys)))
+        XCTAssertThrowsError(try ICCBOR.decodeStrict(Data([0xbf] + Array(duplicateMapKeys.dropFirst()) + [0xff])))
+    }
+
     func testRequestIDAndHashTreeVectors() throws {
         XCTAssertEqual(
             ICRequestID.hash(of: .text("hello")).icHexString,
