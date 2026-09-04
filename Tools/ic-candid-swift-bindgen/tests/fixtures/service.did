@@ -1,0 +1,22 @@
+type Tokens = record {
+  e8s : nat64;
+};
+
+type Node = record {
+  value : text;
+  next : opt Node;
+};
+
+type TransferError = variant {
+  bad_fee : record { expected_fee : Tokens };
+  tx_created_in_future;
+};
+
+service : {
+  account_balance : (record { account : blob }) -> (Tokens) query;
+  transfer : (nat64, opt text) -> (variant { ok : nat64; err : TransferError });
+  status : () -> (nat64, text) query;
+  ignored : () -> (bool) query;
+  walk : (Node) -> (Node) query;
+  numeric_fields : (record { 0 : nat64; 7 : text }) -> () query;
+};

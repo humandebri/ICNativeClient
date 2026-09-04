@@ -1,6 +1,7 @@
 .build/
 .swiftpm/
 DerivedData/
+Tools/ic-candid-swift-bindgen/target/
 xcuserdata/
 *.xcuserstate
 .DS_Store

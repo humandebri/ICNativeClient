@@ -4,6 +4,25 @@ All notable changes are documented here.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-04
+
+### Added
+
+- `ic-candid-swift-bindgen` 0.1.0, a deterministic Rust CLI that generates typed ICNativeClient Swift models and canister method wrappers from selected Candid service methods.
+- `ICNativeClientBindgenPlugin`, a SwiftPM build tool plugin that places generated bindings in Derived Sources without checking generated Swift into consuming projects.
+- macOS arm64 and x86_64 executable artifacts for build-time generation.
+- Build information and CI verification that keep both embedded CLI architectures synchronized with the Rust generator source.
+
+### Fixed
+
+- Internet Identity delegation chains can verify P-256 ECDSA intermediate signatures while retaining strict Ed25519 and canister-signature validation.
+- Generated optional and vector values retain declared-type validation, including alpha-equivalent recursive binder checks at method reply boundaries.
+- Swift member-name collisions with generated properties and methods are renamed deterministically, while manifest-wide top-level type collisions fail generation with their origins.
+
+### Compatibility
+
+- The generated bindings remain compatible with the ICNativeClient 0.6.0 public Candid and transport APIs. P-256 support changes only delegation-signature acceptance; public APIs, stored sessions, principal derivation, and wire formats are unchanged.
+
 ## [0.6.0] - 2026-09-04
 
 ### Added

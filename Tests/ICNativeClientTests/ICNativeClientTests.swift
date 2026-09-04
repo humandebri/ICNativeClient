@@ -412,6 +412,187 @@ final class ICNativeClientTests: XCTestCase {
         ))
     }
 
+    func testCanisterToP256ToEd25519DelegationIsVerified() throws {
+        let now = Date()
+        let root = BLSTKey(seed: 28)
+        let config = try configuration(root: root.derPublicKey)
+        let signingCanister = try XCTUnwrap(ICPrincipal.parse(canisterText))
+        let seed = Data("ii-p256-seed".utf8)
+        let canisterKey = canisterSignatureDER(canister: signingCanister, seed: seed)
+        let intermediateKey = P256.Signing.PrivateKey()
+        let intermediateDER = intermediateKey.publicKey.derRepresentation
+        let sessionKey = Curve25519.Signing.PrivateKey()
+        let sessionDER = ICRC167Codec.derPublicKey(from: sessionKey.publicKey.rawRepresentation)
+        let expiration = nanoseconds(now.addingTimeInterval(3_600))
+        let first = ICDelegationChain.SignedDelegation.Delegation(
+            publicKey: intermediateDER,
+            expiration: expiration,
+            targets: [signingCanister],
+            permissions: .queries
+        )
+        let second = ICDelegationChain.SignedDelegation.Delegation(
+            publicKey: sessionDER,
+            expiration: expiration,
+            targets: [signingCanister],
+            permissions: .queries
+        )
+        let canisterSignature = try makeCanisterSignature(
+            payload: delegationSignable(first),
+            canister: signingCanister,
+            seed: seed,
+            root: root,
+            now: now
+        )
+        let p256Signature = try intermediateKey.signature(for: delegationSignable(second))
+        let chain = ICDelegationChain(
+            publicKey: canisterKey,
+            delegations: [
+                .init(delegation: first, signature: canisterSignature),
+                .init(delegation: second, signature: p256Signature.rawRepresentation),
+            ]
+        )
+        let session = ICAuthSession(storage: ICStoredAuthSession(
+            formatVersion: ICAuthSession.currentFormatVersion,
+            principal: ICPrincipal.text(from: ICPrincipal.selfAuthenticatingPublicKey(canisterKey)),
+            canisterId: config.canisterId,
+            internetIdentityURL: config.internetIdentityURL.absoluteString,
+            derivationOrigin: config.derivationOrigin,
+            sessionPublicKey: sessionDER,
+            sessionPrivateKey: sessionKey.rawRepresentation,
+            delegation: chain,
+            requestedAt: now,
+            maxTimeToLiveNanoseconds: config.delegationTTLNanoseconds
+        ))
+
+        XCTAssertNoThrow(try ICIdentityValidation.validateSession(
+            session,
+            configuration: config,
+            permission: .query,
+            now: now
+        ))
+        XCTAssertThrowsError(try ICIdentityValidation.validateSession(
+            session,
+            configuration: config,
+            permission: .call,
+            now: now
+        ))
+    }
+
+    func testP256DelegationRejectsInvalidSignaturesKeysAndSPKI() throws {
+        let now = Date()
+        let config = try configuration(root: BLSTKey(seed: 29).derPublicKey)
+        let signingKey = P256.Signing.PrivateKey()
+        let sessionKey = Curve25519.Signing.PrivateKey()
+        let sessionDER = ICRC167Codec.derPublicKey(from: sessionKey.publicKey.rawRepresentation)
+        let delegation = ICDelegationChain.SignedDelegation.Delegation(
+            publicKey: sessionDER,
+            expiration: nanoseconds(now.addingTimeInterval(3_600)),
+            targets: nil,
+            permissions: .queries
+        )
+        let signature = try signingKey.signature(for: delegationSignable(delegation))
+
+        func validate(signerDER: Data, signature: Data) throws {
+            try ICIdentityValidation.validateDelegationChain(
+                ICDelegationChain(
+                    publicKey: signerDER,
+                    delegations: [.init(delegation: delegation, signature: signature)]
+                ),
+                expectedSessionPublicKey: sessionDER,
+                canisterId: config.canisterId,
+                requestedAt: now,
+                maxTimeToLiveNanoseconds: config.delegationTTLNanoseconds,
+                permission: .query,
+                trustRoot: config.trustRoot,
+                now: now
+            )
+        }
+
+        XCTAssertNoThrow(try validate(
+            signerDER: signingKey.publicKey.derRepresentation,
+            signature: signature.rawRepresentation
+        ))
+
+        var tampered = signature.rawRepresentation
+        tampered[tampered.startIndex] ^= 1
+        XCTAssertThrowsError(try validate(signerDER: signingKey.publicKey.derRepresentation, signature: tampered))
+        XCTAssertThrowsError(try validate(
+            signerDER: signingKey.publicKey.derRepresentation,
+            signature: Data(signature.rawRepresentation.dropLast())
+        ))
+        XCTAssertThrowsError(try validate(
+            signerDER: signingKey.publicKey.derRepresentation,
+            signature: signature.rawRepresentation + Data([0])
+        ))
+        XCTAssertThrowsError(try validate(
+            signerDER: signingKey.publicKey.derRepresentation,
+            signature: signature.derRepresentation
+        ))
+
+        let rawPublicKey = signingKey.publicKey.x963Representation
+        let compressedPublicKey = Data([0x02]) + rawPublicKey.subdata(in: 1..<33)
+        XCTAssertThrowsError(try validate(
+            signerDER: ecPublicKeyDER(key: compressedPublicKey),
+            signature: signature.rawRepresentation
+        ))
+        XCTAssertThrowsError(try validate(
+            signerDER: ecPublicKeyDER(key: Data([0x04]) + Data(repeating: 0, count: 64)),
+            signature: signature.rawRepresentation
+        ))
+        XCTAssertThrowsError(try validate(
+            signerDER: ecPublicKeyDER(key: rawPublicKey, curveOID: nil),
+            signature: signature.rawRepresentation
+        ))
+        XCTAssertThrowsError(try validate(
+            signerDER: ecPublicKeyDER(
+                key: rawPublicKey,
+                curveOID: Data([0x2b, 0x81, 0x04, 0x00, 0x22])
+            ),
+            signature: signature.rawRepresentation
+        ))
+        XCTAssertThrowsError(try validate(
+            signerDER: ecPublicKeyDER(
+                key: rawPublicKey,
+                curveOID: nil,
+                algorithmSuffix: derTLV(tag: 0x05, value: Data())
+            ),
+            signature: signature.rawRepresentation
+        ))
+        XCTAssertThrowsError(try validate(
+            signerDER: ecPublicKeyDER(
+                key: rawPublicKey,
+                algorithmSuffix: derTLV(tag: 0x05, value: Data())
+            ),
+            signature: signature.rawRepresentation
+        ))
+        XCTAssertThrowsError(try validate(
+            signerDER: ecPublicKeyDER(key: rawPublicKey) + Data([0]),
+            signature: signature.rawRepresentation
+        ))
+
+        let ed25519Key = Curve25519.Signing.PrivateKey()
+        let unexpectedOIDParameter = derTLV(
+            tag: 0x06,
+            value: Data([0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07])
+        )
+        XCTAssertThrowsError(try validate(
+            signerDER: subjectPublicKeyDER(
+                algorithmOID: Data([0x2b, 0x65, 0x70]),
+                algorithmSuffix: unexpectedOIDParameter,
+                key: ed25519Key.publicKey.rawRepresentation
+            ),
+            signature: try ed25519Key.signature(for: delegationSignable(delegation))
+        ))
+        XCTAssertThrowsError(try validate(
+            signerDER: subjectPublicKeyDER(
+                algorithmOID: Data([0x2b, 0x06, 0x01, 0x04, 0x01, 0x83, 0xb8, 0x43, 0x01, 0x02]),
+                algorithmSuffix: unexpectedOIDParameter,
+                key: Data([1, 4]) + Data("seed".utf8)
+            ),
+            signature: Data([1])
+        ))
+    }
+
     func testICRC167CarriesDerivationOriginAndRejectsStateReplay() throws {
         let config = try configuration(root: BLSTKey(seed: 10).derPublicKey)
         let pending = ICRC167PendingRequest(
@@ -1213,10 +1394,56 @@ final class ICNativeClientTests: XCTestCase {
 
     private func canisterSignatureDER(canister: Data, seed: Data) -> Data {
         let raw = Data([UInt8(canister.count)]) + canister + seed
-        let oid = derTLV(tag: 0x06, value: Data([0x2b, 0x06, 0x01, 0x04, 0x01, 0x83, 0xb8, 0x43, 0x01, 0x02]))
-        let algorithm = derTLV(tag: 0x30, value: oid)
-        let bitString = derTLV(tag: 0x03, value: Data([0]) + raw)
+        return subjectPublicKeyDER(
+            algorithmOID: Data([0x2b, 0x06, 0x01, 0x04, 0x01, 0x83, 0xb8, 0x43, 0x01, 0x02]),
+            key: raw
+        )
+    }
+
+    private func ecPublicKeyDER(
+        key: Data,
+        curveOID: Data? = Data([0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]),
+        algorithmSuffix: Data = Data()
+    ) -> Data {
+        let parameters = curveOID.map { derTLV(tag: 0x06, value: $0) } ?? Data()
+        return subjectPublicKeyDER(
+            algorithmOID: Data([0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01]),
+            algorithmSuffix: parameters + algorithmSuffix,
+            key: key
+        )
+    }
+
+    private func subjectPublicKeyDER(
+        algorithmOID: Data,
+        algorithmSuffix: Data = Data(),
+        key: Data
+    ) -> Data {
+        let oid = derTLV(tag: 0x06, value: algorithmOID)
+        let algorithm = derTLV(tag: 0x30, value: oid + algorithmSuffix)
+        let bitString = derTLV(tag: 0x03, value: Data([0]) + key)
         return derTLV(tag: 0x30, value: algorithm + bitString)
+    }
+
+    private func makeCanisterSignature(
+        payload: Data,
+        canister: Data,
+        seed: Data,
+        root: BLSTKey,
+        now: Date
+    ) throws -> Data {
+        let signatureTree = hashTree([(
+            [Data("sig".utf8), Data(SHA256.hash(data: seed)), Data(SHA256.hash(data: payload))],
+            Data()
+        )])
+        let signatureDigest = try ICHashTree(value: signatureTree).digest
+        let certificate = try makeCertificate(leaves: [
+            ([Data("time".utf8)], ICRequestID.leb128(nanoseconds(now.addingTimeInterval(-600)))),
+            ([Data("canister".utf8), canister, Data("certified_data".utf8)], signatureDigest),
+        ], key: root)
+        return ICCBOR.encode(.tagged(ICCBOR.selfDescribeTag, .map([
+            (.text("certificate"), .bytes(certificate)),
+            (.text("tree"), signatureTree),
+        ])))
     }
 
     private func derTLV(tag: UInt8, value: Data) -> Data {

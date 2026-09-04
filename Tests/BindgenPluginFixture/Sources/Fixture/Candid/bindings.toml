@@ -1,0 +1,11 @@
+[[canister]]
+name = "Self"
+did = "Sources/Fixture/Candid/service.did"
+canister_id = "aaaaa-aa"
+methods = ["lookup"]
+
+[[canister]]
+name = "Fixture"
+did = "Sources/Fixture/Candid/service.did"
+canister_id = "aaaaa-aa"
+methods = ["lookup", "store", "echo_chain", "containers", "client", "canister_id", "control\u000Bmethod"]
