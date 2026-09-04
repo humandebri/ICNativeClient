@@ -105,6 +105,8 @@ struct User: CandidConvertible {
 
 `CandidNat` and `CandidInt` retain canonical decimal strings for arbitrary-precision values. `CandidPrincipal` validates principal text. Variants use `CandidVariant` with the complete declared case list, selected tag, and payload.
 
+Use `CandidNull()` for a typed Candid `null`, including payload-free variant cases such as `variant { ok; err : text }`. It is distinct from an empty Candid record.
+
 `Data` and `[UInt8]` both map to Candid `vec nat8`. Recursive wire types are retained with `CandidType.recursive` and `CandidType.reference`; finite values can be decoded and re-encoded, while the configured nesting limit still rejects excessively deep values.
 
 Use `queryRaw` and `callRaw` when integrating generated bindings or Candid types not represented by this value API. `unsafeQueryRaw` remains the explicit unverified opt-out; there is intentionally no typed unsafe wrapper.
@@ -132,6 +134,23 @@ Rejects are exposed as `ICClientError.rejected(ICReject)`, including reject code
 
 For management-canister calls, `canisterId` remains the content canister ID used for delegation targets, while `effectiveCanisterId` controls HTTP routing and certificate range authorization.
 
+HTTP and polling behavior can be tuned without replacing the transport:
+
+```swift
+let network = try ICNetworkConfiguration(
+    requestTimeout: 15,
+    pollingInterval: .milliseconds(500),
+    maximumPollingAttempts: 20
+)
+let configuration = try ICClientConfiguration(
+    canisterId: canisterID,
+    derivationOrigin: derivationOrigin,
+    network: network
+)
+```
+
+The defaults remain a 20-second request timeout, a one-second polling interval, and 30 polling attempts. Passing `attempts` directly to `poll` overrides the configured maximum for that call.
+
 ## Internet Identity native authentication
 
 `ICInternetIdentityAuthenticator` uses direct ICRC-167 URL transport on iOS 17.4 or newer. It binds the callback state and JSON-RPC request ID, forwards `derivationOrigin`, validates the session private/public key pair, and verifies every delegation signature, expiration, target, permission, and chain bound.
@@ -152,6 +171,18 @@ let identity = try await authenticator.authenticate(
     prefersEphemeralWebBrowserSession: false
 )
 ```
+
+Authentication omits `targets` by default to preserve the existing relying-party principal behavior. To require a canister-scoped delegation, pass explicit targets containing the configured canister and every additional canister the session will call:
+
+```swift
+let options = try ICAuthenticationOptions(
+    maxTimeToLiveNanoseconds: 3_600_000_000_000,
+    targets: [configuration.canisterId, ledgerCanisterID]
+)
+let identity = try await authenticator.authenticate(options: options)
+```
+
+Explicit targets must be valid, unique principal texts. ICNativeClient rejects an unscoped response or a response whose effective target scope exceeds the requested set. Because ICRC-34 targets can enable an account delegation, opting into them may produce a different principal than the default relying-party delegation. A per-authentication lifetime overrides the authenticator and client-configuration defaults.
 
 Authorization times out after 330 seconds by default and throws `ICClientError.authorizationTimedOut`. Cancelling the calling task cancels the active browser session. The shared browser session remains the default so passkeys and existing Internet Identity sessions are available; use an ephemeral session only for an intentional clean-session flow.
 
@@ -184,6 +215,18 @@ let restored = try store.load() // nil only when no item is registered
 ```
 
 Saving updates an existing item first and adds only when absent, so an update failure does not delete the prior session. Keychain failures and malformed legacy data are thrown without deleting stored bytes; only an absent item returns `nil`.
+
+To share the session between an application and its extensions, configure the same Keychain access group, service, and account in every target:
+
+```swift
+let sharedStore = ICIdentityStore(
+    configuration: configuration,
+    service: "com.example.app.ic",
+    accessGroup: "TEAMID.com.example.shared"
+)
+```
+
+Every participating target must include that access group in its Keychain Sharing entitlement. ICNativeClient does not migrate items between access groups or from application-specific storage formats. If the shared item is initially absent, authenticate and save the session from the main application before an extension attempts to load it. An invalid access group or missing entitlement is reported as `ICClientError.keychainFailure`.
 
 ## New in 0.5.0
 

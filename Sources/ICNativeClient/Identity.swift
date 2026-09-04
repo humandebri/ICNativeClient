@@ -102,25 +102,35 @@ public final class ICIdentityStore {
     private let configuration: ICClientConfiguration
     private let service: String
     private let account: String
+    private let accessGroup: String?
     private let keychain: any ICKeychainAccess
 
     public convenience init(
         configuration: ICClientConfiguration,
         service: String,
-        account: String = "internet-identity-session"
+        account: String = "internet-identity-session",
+        accessGroup: String? = nil
     ) {
-        self.init(configuration: configuration, service: service, account: account, keychain: ICSystemKeychain())
+        self.init(
+            configuration: configuration,
+            service: service,
+            account: account,
+            accessGroup: accessGroup,
+            keychain: ICSystemKeychain()
+        )
     }
 
     init(
         configuration: ICClientConfiguration,
         service: String,
         account: String,
+        accessGroup: String? = nil,
         keychain: any ICKeychainAccess
     ) {
         self.configuration = configuration
         self.service = service
         self.account = account
+        self.accessGroup = accessGroup
         self.keychain = keychain
     }
 
@@ -173,11 +183,15 @@ public final class ICIdentityStore {
     }
 
     private func baseQuery() -> [String: Any] {
-        [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
+        if let accessGroup {
+            query[kSecAttrAccessGroup as String] = accessGroup
+        }
+        return query
     }
 }
 

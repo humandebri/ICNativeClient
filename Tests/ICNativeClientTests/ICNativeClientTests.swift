@@ -43,6 +43,9 @@ final class ICNativeClientTests: XCTestCase {
         let config = try configuration(root: BLSTKey(seed: 1).derPublicKey)
         XCTAssertEqual(config.delegationTTLNanoseconds, 28_800_000_000_000)
         XCTAssertEqual(config.maximumResponseBytes, 10 * 1_024 * 1_024)
+        XCTAssertEqual(config.network.requestTimeout, 20)
+        XCTAssertEqual(config.network.pollingInterval, .seconds(1))
+        XCTAssertEqual(config.network.maximumPollingAttempts, 30)
         XCTAssertThrowsError(try ICClientConfiguration(
             canisterId: canisterText,
             apiBaseURL: URL(string: "http://ic0.app")!,
@@ -62,6 +65,10 @@ final class ICNativeClientTests: XCTestCase {
             derivationOrigin: "https://example.com",
             trustRoot: .custom(Data(repeating: 0, count: 133))
         ))
+        XCTAssertThrowsError(try ICNetworkConfiguration(requestTimeout: 0))
+        XCTAssertThrowsError(try ICNetworkConfiguration(requestTimeout: .infinity))
+        XCTAssertThrowsError(try ICNetworkConfiguration(pollingInterval: .zero))
+        XCTAssertThrowsError(try ICNetworkConfiguration(maximumPollingAttempts: 0))
     }
 
     func testAPIURLIsStructuredAndRejectsArbitraryRequestType() throws {
@@ -713,6 +720,69 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertNil(try store.load())
     }
 
+    func testIdentityStoreUsesAccessGroupForEveryKeychainOperation() throws {
+        let config = try configuration(root: BLSTKey(seed: 28).derPublicKey)
+        let session = try makeAuthSession(config: config)
+        let accessGroup = "TEAMID.com.example.shared"
+        let keychain = MockKeychain(data: nil)
+        let store = ICIdentityStore(
+            configuration: config,
+            service: "shared-service",
+            account: "shared-account",
+            accessGroup: accessGroup,
+            keychain: keychain
+        )
+
+        XCTAssertNil(try store.load())
+        try store.save(session)
+        try store.clear()
+
+        let queries = keychain.copyQueries + keychain.updateQueries + keychain.addQueries + keychain.deleteQueries
+        XCTAssertFalse(queries.isEmpty)
+        for query in queries {
+            XCTAssertEqual(query[kSecAttrAccessGroup as String] as? String, accessGroup)
+        }
+
+        let retryKeychain = MockKeychain(data: nil)
+        retryKeychain.updateStatuses = [errSecItemNotFound, errSecSuccess]
+        retryKeychain.addStatus = errSecDuplicateItem
+        let retryStore = ICIdentityStore(
+            configuration: config,
+            service: "shared-service",
+            account: "shared-account",
+            accessGroup: accessGroup,
+            keychain: retryKeychain
+        )
+        try retryStore.save(session)
+        XCTAssertEqual(retryKeychain.updateQueries.count, 2)
+        XCTAssertEqual(retryKeychain.addQueries.count, 1)
+        for query in retryKeychain.updateQueries + retryKeychain.addQueries {
+            XCTAssertEqual(query[kSecAttrAccessGroup as String] as? String, accessGroup)
+        }
+    }
+
+    func testIdentityStoreOmitsAccessGroupWhenUnspecified() throws {
+        let config = try configuration(root: BLSTKey(seed: 29).derPublicKey)
+        let session = try makeAuthSession(config: config)
+        let keychain = MockKeychain(data: nil)
+        let store = ICIdentityStore(
+            configuration: config,
+            service: "private-service",
+            account: "private-account",
+            keychain: keychain
+        )
+
+        XCTAssertNil(try store.load())
+        try store.save(session)
+        try store.clear()
+
+        let queries = keychain.copyQueries + keychain.updateQueries + keychain.addQueries + keychain.deleteQueries
+        XCTAssertFalse(queries.isEmpty)
+        for query in queries {
+            XCTAssertNil(query[kSecAttrAccessGroup as String])
+        }
+    }
+
     func testBLSVerificationPerformanceIsMeasured() throws {
         let key = BLSTKey(seed: 17)
         let message = Data("benchmark".utf8)
@@ -742,10 +812,107 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertEqual(pending.maxTimeToLiveNanoseconds, 28_800_000_000_000)
         XCTAssertEqual(parameters["maxTimeToLive"] as? String, "28800000000000")
         XCTAssertEqual(parameters["icrc95DerivationOrigin"] as? String, config.derivationOrigin)
+        XCTAssertNil(parameters["targets"])
         XCTAssertNotEqual(pending.requestID, pending.state)
         XCTAssertEqual(fields["callback"], callback.absoluteString)
         XCTAssertFalse(url.absoluteString.contains("native-auth"))
         XCTAssertNil(components.queryItems?.first { ["message", "callback", "state"].contains($0.name) })
+    }
+
+    func testICRC167RequestsAndEnforcesExplicitTargetScope() throws {
+        let config = try configuration(root: BLSTKey(seed: 30).derPublicKey)
+        let requestedTargets = [canisterText, "aaaaa-aa"]
+        let pending = try ICRC167Codec.makePendingRequest(targets: requestedTargets, requestedAt: Date())
+        let callback = URL(string: "https://app.example/ios-auth-callback")!
+        let url = try ICRC167Codec.authorizationURL(
+            configuration: config,
+            callbackURL: callback,
+            pendingRequest: pending
+        )
+        let fragment = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedFragment)
+        let fields = try ICRC167Codec.parseFormEncoded(fragment)
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(fields["message"]!.utf8)) as? [String: Any])
+        let parameters = try XCTUnwrap(request["params"] as? [String: Any])
+        XCTAssertEqual(parameters["targets"] as? [String], requestedTargets)
+
+        XCTAssertNoThrow(try parseICRC(
+            try icrcCallback(pending: pending, targets: [canisterText]),
+            pending: pending,
+            config: config
+        ))
+
+        let unscoped = try ICRC167Codec.makePendingRequest(targets: requestedTargets, requestedAt: Date())
+        XCTAssertThrowsError(try parseICRC(
+            try icrcCallback(pending: unscoped),
+            pending: unscoped,
+            config: config
+        ))
+
+        let expanded = try ICRC167Codec.makePendingRequest(targets: requestedTargets, requestedAt: Date())
+        XCTAssertThrowsError(try parseICRC(
+            try icrcCallback(pending: expanded, targets: [canisterText, "2vxsx-fae"]),
+            pending: expanded,
+            config: config
+        ))
+
+        XCTAssertThrowsError(try ICAuthenticationOptions(targets: []))
+        XCTAssertThrowsError(try ICAuthenticationOptions(targets: [canisterText, canisterText]))
+        XCTAssertThrowsError(try ICAuthenticationOptions(targets: ["not-a-principal"]))
+        XCTAssertThrowsError(try ICAuthenticationOptions(maxTimeToLiveNanoseconds: 0))
+        let missingConfigured = try ICRC167Codec.makePendingRequest(targets: ["aaaaa-aa"])
+        XCTAssertThrowsError(try ICRC167Codec.authorizationURL(
+            configuration: config,
+            callbackURL: callback,
+            pendingRequest: missingConfigured
+        ))
+    }
+
+    func testNetworkConfigurationControlsRequestTimeoutPollingIntervalAndAttempts() async throws {
+        let root = BLSTKey(seed: 32)
+        let network = try ICNetworkConfiguration(
+            requestTimeout: 7,
+            pollingInterval: .milliseconds(25),
+            maximumPollingAttempts: 2
+        )
+        let config = try ICClientConfiguration(
+            canisterId: canisterText,
+            derivationOrigin: "https://example.com",
+            trustRoot: .custom(root.derPublicKey),
+            network: network
+        )
+        let identity = try makeAuthSession(config: config)
+        let recorder = NetworkRecorder()
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.protocolClasses = [URLProtocolStub.self]
+        URLProtocolStub.handler = { request in
+            recorder.record(requestTimeout: request.timeoutInterval)
+            let certificate = try self.makeCertificate(leaves: [
+                ([Data("time".utf8)], ICRequestID.leb128(self.nanoseconds(Date()))),
+            ], key: root)
+            return response(request, status: 200, body: readStateResponse(certificate))
+        }
+        let configuredClient = ICClient(
+            configuration: config,
+            session: URLSession(configuration: sessionConfiguration)
+        ) { duration in
+            recorder.record(sleepDuration: duration)
+        }
+
+        await XCTAssertThrowsErrorAsync(
+            try await configuredClient.poll(requestId: Data(count: 32), identity: identity)
+        ) { error in
+            XCTAssertEqual(error as? ICClientError, .pollTimeout)
+        }
+        XCTAssertEqual(recorder.requestTimeouts, [7, 7])
+        XCTAssertEqual(recorder.sleepDurations, [.milliseconds(25), .milliseconds(25)])
+
+        await XCTAssertThrowsErrorAsync(
+            try await configuredClient.poll(requestId: Data(count: 32), identity: identity, attempts: 1)
+        ) { error in
+            XCTAssertEqual(error as? ICClientError, .pollTimeout)
+        }
+        XCTAssertEqual(recorder.requestTimeouts, [7, 7, 7])
+        XCTAssertEqual(recorder.sleepDurations, [.milliseconds(25), .milliseconds(25), .milliseconds(25)])
     }
 
     func testICRC167AcceptsSignedOneAndTwoHopResponses() throws {
@@ -947,13 +1114,17 @@ final class ICNativeClientTests: XCTestCase {
         return Data([0x1a]) + Data("ic-request-auth-delegation".utf8) + ICRequestID.hash(of: .map(fields))
     }
 
-    private func icrcPending(ttl: UInt64 = ICRC167Codec.defaultMaxTimeToLiveNanoseconds) -> ICRC167PendingRequest {
+    private func icrcPending(
+        ttl: UInt64 = ICRC167Codec.defaultMaxTimeToLiveNanoseconds,
+        targets: [String]? = nil
+    ) -> ICRC167PendingRequest {
         ICRC167PendingRequest(
             requestID: UUID().uuidString,
             state: UUID().uuidString,
             privateKey: Curve25519.Signing.PrivateKey(),
             requestedAt: Date(),
-            maxTimeToLiveNanoseconds: ttl
+            maxTimeToLiveNanoseconds: ttl,
+            requestedTargets: targets
         )
     }
 
@@ -1210,25 +1381,62 @@ private final class URLProtocolStub: URLProtocol, @unchecked Sendable {
 private final class MockKeychain: ICKeychainAccess, @unchecked Sendable {
     var data: Data?
     var updateStatus: OSStatus = errSecSuccess
+    var updateStatuses: [OSStatus] = []
+    var addStatus: OSStatus?
     var copyStatus: OSStatus = errSecSuccess
+    var copyQueries: [[String: Any]] = []
+    var updateQueries: [[String: Any]] = []
+    var addQueries: [[String: Any]] = []
+    var deleteQueries: [[String: Any]] = []
     init(data: Data?) { self.data = data }
     func copyMatching(_ query: CFDictionary, result: UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus {
+        copyQueries.append(query as? [String: Any] ?? [:])
         guard copyStatus == errSecSuccess else { return copyStatus }
         result?.pointee = data as CFData?
         return data == nil ? errSecItemNotFound : errSecSuccess
     }
     func update(_ query: CFDictionary, attributes: CFDictionary) -> OSStatus {
+        updateQueries.append(query as? [String: Any] ?? [:])
+        if !updateStatuses.isEmpty {
+            let status = updateStatuses.removeFirst()
+            guard status == errSecSuccess else { return status }
+            if let value = attributes as? [String: Any], let newData = value[kSecValueData as String] as? Data { data = newData }
+            return errSecSuccess
+        }
         guard updateStatus == errSecSuccess else { return updateStatus }
         guard data != nil else { return errSecItemNotFound }
         if let value = attributes as? [String: Any], let newData = value[kSecValueData as String] as? Data { data = newData }
         return errSecSuccess
     }
     func add(_ attributes: CFDictionary) -> OSStatus {
+        addQueries.append(attributes as? [String: Any] ?? [:])
+        if let addStatus { return addStatus }
         if data != nil { return errSecDuplicateItem }
         if let value = attributes as? [String: Any] { data = value[kSecValueData as String] as? Data }
         return errSecSuccess
     }
-    func delete(_ query: CFDictionary) -> OSStatus { data = nil; return errSecSuccess }
+    func delete(_ query: CFDictionary) -> OSStatus {
+        deleteQueries.append(query as? [String: Any] ?? [:])
+        data = nil
+        return errSecSuccess
+    }
+}
+
+private final class NetworkRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedRequestTimeouts: [TimeInterval] = []
+    private var recordedSleepDurations: [Duration] = []
+
+    var requestTimeouts: [TimeInterval] { lock.withLock { recordedRequestTimeouts } }
+    var sleepDurations: [Duration] { lock.withLock { recordedSleepDurations } }
+
+    func record(requestTimeout: TimeInterval) {
+        lock.withLock { recordedRequestTimeouts.append(requestTimeout) }
+    }
+
+    func record(sleepDuration: Duration) {
+        lock.withLock { recordedSleepDurations.append(sleepDuration) }
+    }
 }
 
 private func response(_ request: URLRequest, status: Int, body: Data) -> (HTTPURLResponse, Data) {

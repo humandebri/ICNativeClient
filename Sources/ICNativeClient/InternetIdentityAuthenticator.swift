@@ -49,7 +49,8 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
     @MainActor
     public func authenticate(
         timeout: Duration = ICInternetIdentityAuthenticator.defaultAuthorizationTimeout,
-        prefersEphemeralWebBrowserSession: Bool = false
+        prefersEphemeralWebBrowserSession: Bool = false,
+        options: ICAuthenticationOptions = .default
     ) async throws -> ICAuthSession {
         guard timeout > .zero else {
             throw ICClientError.authorizationFailed("Internet Identity authorization timeout must be positive.")
@@ -59,7 +60,8 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
         }
 
         let pendingRequest = try ICRC167Codec.makePendingRequest(
-            maxTimeToLiveNanoseconds: maxTimeToLiveNanoseconds
+            maxTimeToLiveNanoseconds: options.maxTimeToLiveNanoseconds ?? maxTimeToLiveNanoseconds,
+            targets: options.targets
         )
         let authorizationURL = try ICRC167Codec.authorizationURL(
             configuration: configuration,
