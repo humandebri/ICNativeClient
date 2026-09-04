@@ -371,22 +371,22 @@ impl<'a> Lowerer<'a> {
                 Ok(SwiftType::Named(name))
             }
             TypeInner::Float32 => {
-                anyhow::bail!("{suggested_name}: float32 is unsupported in bindgen 0.1.0")
+                anyhow::bail!("{suggested_name}: float32 is unsupported in bindgen 0.1.1")
             }
             TypeInner::Float64 => {
-                anyhow::bail!("{suggested_name}: float64 is unsupported in bindgen 0.1.0")
+                anyhow::bail!("{suggested_name}: float64 is unsupported in bindgen 0.1.1")
             }
             TypeInner::Reserved => {
-                anyhow::bail!("{suggested_name}: reserved is unsupported in bindgen 0.1.0")
+                anyhow::bail!("{suggested_name}: reserved is unsupported in bindgen 0.1.1")
             }
             TypeInner::Empty => {
-                anyhow::bail!("{suggested_name}: empty is unsupported in bindgen 0.1.0")
+                anyhow::bail!("{suggested_name}: empty is unsupported in bindgen 0.1.1")
             }
             TypeInner::Func(_) => {
-                anyhow::bail!("{suggested_name}: func values are unsupported in bindgen 0.1.0")
+                anyhow::bail!("{suggested_name}: func values are unsupported in bindgen 0.1.1")
             }
             TypeInner::Service(_) | TypeInner::Class(_, _) => {
-                anyhow::bail!("{suggested_name}: service values are unsupported in bindgen 0.1.0")
+                anyhow::bail!("{suggested_name}: service values are unsupported in bindgen 0.1.1")
             }
             TypeInner::Knot(_) => {
                 anyhow::bail!("{suggested_name}: Rust-internal recursive knots are unsupported")
@@ -522,7 +522,7 @@ impl<'a> Lowerer<'a> {
                 }
                 if self.reaches(&dependency, &definition.name, &mut BTreeSet::new()) {
                     anyhow::bail!(
-                        "mutually recursive types {} and {} are unsupported in bindgen 0.1.0",
+                        "mutually recursive types {} and {} are unsupported in bindgen 0.1.1",
                         definition.name,
                         dependency
                     );

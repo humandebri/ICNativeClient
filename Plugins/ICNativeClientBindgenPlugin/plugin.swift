@@ -1,27 +1,43 @@
 import Foundation
 import PackagePlugin
+#if canImport(XcodeProjectPlugin)
+import XcodeProjectPlugin
+#endif
 
 @main
 struct ICNativeClientBindgenPlugin: BuildToolPlugin {
     func createBuildCommands(context: PluginContext, target: Target) async throws -> [Command] {
-        let manifests = try findManifests(in: context.package.directory)
+        try createBuildCommands(
+            projectDirectory: context.package.directory,
+            workDirectory: context.pluginWorkDirectory,
+            tool: context.tool(named: "ic-candid-swift-bindgen"),
+            targetName: target.name
+        )
+    }
+
+    fileprivate func createBuildCommands(
+        projectDirectory: Path,
+        workDirectory: Path,
+        tool: PluginContext.Tool,
+        targetName: String
+    ) throws -> [Command] {
+        let manifests = try findManifests(in: projectDirectory)
         guard manifests.count == 1, let manifest = manifests.first else {
             let paths = manifests.map(\.string).joined(separator: ", ")
             throw PluginError.invalidManifestCount(count: manifests.count, paths: paths)
         }
 
-        let tool = try context.tool(named: "ic-candid-swift-bindgen")
-        let outputDirectory = context.pluginWorkDirectory.appending("Generated")
+        let outputDirectory = workDirectory.appending("Generated")
         let output = outputDirectory.appending("ICNativeClientCandidBindings.swift")
 
         return [
             .prebuildCommand(
-                displayName: "Generate Candid bindings for \(target.name)",
+                displayName: "Generate Candid bindings for \(targetName)",
                 executable: tool.path,
                 arguments: [
                     "--manifest", manifest.string,
                     "--output", output.string,
-                    "--project-root", context.package.directory.string,
+                    "--project-root", projectDirectory.string,
                 ],
                 outputFilesDirectory: outputDirectory
             )
@@ -56,6 +72,20 @@ struct ICNativeClientBindgenPlugin: BuildToolPlugin {
         return results.sorted { $0.string < $1.string }
     }
 }
+
+#if canImport(XcodeProjectPlugin)
+extension ICNativeClientBindgenPlugin: XcodeBuildToolPlugin {
+    func createBuildCommands(context: XcodePluginContext, target: XcodeTarget) throws -> [Command] {
+        try createBuildCommands(
+            projectDirectory: context.xcodeProject.directory,
+            workDirectory: context.pluginWorkDirectory,
+            tool: context.tool(named: "ic-candid-swift-bindgen"),
+            targetName: target.displayName
+        )
+    }
+}
+#endif
+
 private enum PluginError: Error, CustomStringConvertible {
     case cannotReadPackage(String)
     case invalidManifestCount(count: Int, paths: String)

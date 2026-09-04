@@ -652,16 +652,142 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertEqual(lock.withLock { readStateCount }, 1)
     }
 
+    func testManagementQuerySeparatesRequestAndEffectiveCanisterIDs() async throws {
+        let root = BLSTKey(seed: 32)
+        let node = Curve25519.Signing.PrivateKey()
+        let nodeID = Data([0xcd])
+        let config = try configuration(root: root.derPublicKey)
+        let managementText = "aaaaa-aa"
+        let management = try XCTUnwrap(ICPrincipal.parse(managementText))
+        let effective = try XCTUnwrap(ICPrincipal.parse(canisterText))
+        let identity = try makeAuthSession(
+            config: config,
+            targets: [management],
+            permission: .queries
+        )
+        let certificate = try makeSubnetCertificate(
+            root: root,
+            nodeID: nodeID,
+            node: node,
+            now: Date(),
+            range: (effective, effective)
+        )
+        let lock = NSLock()
+        var paths: [String] = []
+        var requestCanister: Data?
+
+        URLProtocolStub.handler = { request in
+            let path = request.url?.path ?? ""
+            lock.withLock { paths.append(path) }
+            if path.hasSuffix("/read_state") {
+                return response(request, status: 200, body: readStateResponse(certificate))
+            }
+            let content = try requestContent(request)
+            guard case .bytes(let canister) = ICCBOR.mapValue(content, key: "canister_id") else {
+                throw ICClientError.invalidResponse("query canister_id")
+            }
+            lock.withLock { requestCanister = canister }
+            let requestID = ICRequestID.hash(of: content)
+            let argument = Data("status".utf8)
+            let timestamp = self.nanoseconds(Date())
+            let unsigned = queryResponse(arg: argument, signatures: [])
+            let parsed = try ICQueryResponse(cbor: unsigned)
+            let signature = try node.signature(
+                for: parsed.signable(requestID: requestID, timestamp: timestamp)
+            )
+            return response(request, status: 200, body: queryResponse(
+                arg: argument,
+                signatures: [(nodeID, signature, timestamp)]
+            ))
+        }
+
+        let result = try await client(config).queryRaw(
+            method: "canister_status",
+            canisterId: managementText,
+            effectiveCanisterId: canisterText,
+            identity: identity
+        )
+
+        XCTAssertEqual(result, Data("status".utf8))
+        XCTAssertEqual(lock.withLock { requestCanister }, management)
+        XCTAssertEqual(lock.withLock { paths }, [
+            "/api/v3/canister/\(canisterText)/query",
+            "/api/v3/canister/\(canisterText)/read_state",
+        ])
+    }
+
+    func testUnsafeManagementQueryUsesEffectiveCanisterIDWithoutChangingContent() async throws {
+        let config = try configuration(root: BLSTKey(seed: 33).derPublicKey)
+        let managementText = "aaaaa-aa"
+        let management = try XCTUnwrap(ICPrincipal.parse(managementText))
+        let lock = NSLock()
+        var path: String?
+        var requestCanister: Data?
+
+        URLProtocolStub.handler = { request in
+            let content = try requestContent(request)
+            guard case .bytes(let canister) = ICCBOR.mapValue(content, key: "canister_id") else {
+                throw ICClientError.invalidResponse("query canister_id")
+            }
+            lock.withLock {
+                path = request.url?.path
+                requestCanister = canister
+            }
+            return response(request, status: 200, body: queryResponse(
+                arg: Data("status".utf8),
+                signatures: []
+            ))
+        }
+
+        let result = try await client(config).unsafeQueryRaw(
+            method: "canister_status",
+            canisterId: managementText,
+            effectiveCanisterId: canisterText
+        )
+
+        XCTAssertEqual(result, Data("status".utf8))
+        XCTAssertEqual(lock.withLock { path }, "/api/v3/canister/\(canisterText)/query")
+        XCTAssertEqual(lock.withLock { requestCanister }, management)
+    }
+
+    func testQueryRejectsInvalidEffectiveCanisterIDBeforeTransport() async throws {
+        let config = try configuration(root: BLSTKey(seed: 34).derPublicKey)
+        let lock = NSLock()
+        var requests = 0
+        URLProtocolStub.handler = { request in
+            lock.withLock { requests += 1 }
+            return response(request, status: 500, body: Data())
+        }
+
+        await XCTAssertThrowsErrorAsync(try await client(config).queryRaw(
+            method: "read",
+            effectiveCanisterId: "not-a-principal"
+        )) { error in
+            XCTAssertEqual(error as? ICClientError, .invalidCanisterId)
+        }
+        XCTAssertEqual(lock.withLock { requests }, 0)
+    }
+
     func testCandidQueryUsesVerifiedRawTransportWithoutChangingArgumentBytes() async throws {
         let root = BLSTKey(seed: 31)
         let node = Curve25519.Signing.PrivateKey()
         let nodeID = Data([0xcc])
         let config = try configuration(root: root.derPublicKey)
-        let certificate = try makeSubnetCertificate(root: root, nodeID: nodeID, node: node, now: Date())
+        let effective = try XCTUnwrap(ICPrincipal.parse(canisterText))
+        let certificate = try makeSubnetCertificate(
+            root: root,
+            nodeID: nodeID,
+            node: node,
+            now: Date(),
+            range: (effective, effective)
+        )
         let expectedArgument = try CandidArguments("input").encode()
+        let expectedEmptyArguments = try CandidArguments().encode()
         let encodedReply = try CandidArguments("typed reply").encode()
         let lock = NSLock()
-        var sentArgument: Data?
+        var sentArguments: [Data] = []
+        var requestCanisters: [Data] = []
+        var queryPaths: [String] = []
 
         URLProtocolStub.handler = { request in
             if request.url?.path.hasSuffix("/read_state") == true {
@@ -671,7 +797,14 @@ final class ICNativeClientTests: XCTestCase {
             guard case .bytes(let argument) = ICCBOR.mapValue(content, key: "arg") else {
                 throw ICClientError.invalidResponse("query arg")
             }
-            lock.withLock { sentArgument = argument }
+            guard case .bytes(let canister) = ICCBOR.mapValue(content, key: "canister_id") else {
+                throw ICClientError.invalidResponse("query canister_id")
+            }
+            lock.withLock {
+                sentArguments.append(argument)
+                requestCanisters.append(canister)
+                queryPaths.append(request.url?.path ?? "")
+            }
             let requestID = ICRequestID.hash(of: content)
             let timestamp = self.nanoseconds(Date())
             let unsigned = queryResponse(arg: encodedReply, signatures: [])
@@ -683,9 +816,41 @@ final class ICNativeClientTests: XCTestCase {
             ))
         }
 
-        let result: String = try await client(config).query(method: "typed", argument: "input")
+        let client = client(config)
+        let candidReply = try await client.queryCandid(
+            method: "candid",
+            arguments: CandidArguments("input"),
+            canisterId: "aaaaa-aa",
+            effectiveCanisterId: canisterText
+        )
+        let outputOnly: String = try await client.query(
+            method: "typed-output",
+            canisterId: "aaaaa-aa",
+            effectiveCanisterId: canisterText
+        )
+        let result: String = try await client.query(
+            method: "typed",
+            argument: "input",
+            canisterId: "aaaaa-aa",
+            effectiveCanisterId: canisterText
+        )
+
+        XCTAssertEqual(try candidReply.decode(String.self), "typed reply")
+        XCTAssertEqual(outputOnly, "typed reply")
         XCTAssertEqual(result, "typed reply")
-        XCTAssertEqual(lock.withLock { sentArgument }, expectedArgument)
+        XCTAssertEqual(lock.withLock { sentArguments }, [
+            expectedArgument,
+            expectedEmptyArguments,
+            expectedArgument,
+        ])
+        XCTAssertEqual(lock.withLock { requestCanisters }, Array(
+            repeating: try XCTUnwrap(ICPrincipal.parse("aaaaa-aa")),
+            count: 3
+        ))
+        XCTAssertEqual(lock.withLock { queryPaths }, Array(
+            repeating: "/api/v3/canister/\(canisterText)/query",
+            count: 3
+        ))
     }
 
     func testQueryRejectsTamperedSignatureAndRefreshesOnlyOnce() async throws {
@@ -1463,9 +1628,10 @@ final class ICNativeClientTests: XCTestCase {
         root: BLSTKey,
         nodeID: Data,
         node: Curve25519.Signing.PrivateKey,
-        now: Date
+        now: Date,
+        range: (Data, Data) = (Data(), Data(repeating: 0xff, count: 29))
     ) throws -> Data {
-        let ranges = ICCBOR.encode(.array([.array([.bytes(Data()), .bytes(Data(repeating: 0xff, count: 29))])]))
+        let ranges = ICCBOR.encode(.array([.array([.bytes(range.0), .bytes(range.1)])]))
         return try makeCertificate(leaves: [
             ([Data("time".utf8)], ICRequestID.leb128(nanoseconds(now))),
             ([Data("subnet".utf8), subnetID, Data("canister_ranges".utf8)], ranges),

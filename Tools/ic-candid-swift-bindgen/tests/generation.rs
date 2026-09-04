@@ -20,6 +20,9 @@ fn generates_selected_typed_bindings_deterministically() {
     assert!(first.contains("public func accountBalance("));
     assert!(first.contains("public func transfer("));
     assert!(first.contains("effectiveCanisterId: String? = nil"));
+    assert!(first.contains("identity: ICAuthSession? = nil, effectiveCanisterId: String? = nil"));
+    assert!(first.contains("queryCandid(\n            method: \"account_balance\","));
+    assert!(first.contains("effectiveCanisterId: effectiveCanisterId"));
     assert!(first.contains("public struct LedgerStatusResult: Sendable"));
     assert!(first.contains("public let field0: UInt64"));
     assert!(first.contains("public let field7: String"));
