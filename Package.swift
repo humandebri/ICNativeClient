@@ -30,5 +30,9 @@ let package = Package(
             dependencies: ["ICNativeClient", "CBlst"],
             resources: [.copy("Fixtures")]
         ),
+        .testTarget(
+            name: "ICNativeClientIOSTests",
+            dependencies: ["ICNativeClient"]
+        ),
     ]
 )

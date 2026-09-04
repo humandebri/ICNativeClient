@@ -21,28 +21,16 @@ final class ICNativeClientTests: XCTestCase {
         )
     }
 
-#if canImport(UIKit)
-    @available(iOS 17.4, *)
-    func testAuthenticatorRetainsExplicitCallbackAndTimeoutAPI() throws {
-        XCTAssertEqual(ICInternetIdentityAuthenticator.defaultAuthorizationTimeout, .seconds(330))
-        XCTAssertEqual(
-            try ICInternetIdentityAuthenticator.callbackURL(
-                callbackDomain: "app.example.com",
-                callbackPath: "/native-auth-callback"
-            ).absoluteString,
-            "https://app.example.com/native-auth-callback"
-        )
-        XCTAssertThrowsError(try ICInternetIdentityAuthenticator.callbackURL(
-            callbackDomain: "app.example.com",
-            callbackPath: "native-auth-callback"
-        ))
-    }
-#endif
-
-    func testConfigurationValidatesInputsAndDefaultsToEightHours() throws {
+    func testConfigurationValidatesInputsAndDefaultsToThirtyDays() throws {
         let config = try configuration(root: BLSTKey(seed: 1).derPublicKey)
-        XCTAssertEqual(config.delegationTTLNanoseconds, 28_800_000_000_000)
+        XCTAssertEqual(config.delegationTTLNanoseconds, 2_592_000_000_000_000)
         XCTAssertEqual(config.maximumResponseBytes, 10 * 1_024 * 1_024)
+        XCTAssertEqual(try ICClientConfiguration(
+            canisterId: canisterText,
+            derivationOrigin: "https://example.com",
+            trustRoot: .custom(BLSTKey(seed: 28).derPublicKey),
+            delegationTTLNanoseconds: 3_600_000_000_000
+        ).delegationTTLNanoseconds, 3_600_000_000_000)
         XCTAssertThrowsError(try ICClientConfiguration(
             canisterId: canisterText,
             apiBaseURL: URL(string: "http://ic0.app")!,
@@ -535,7 +523,8 @@ final class ICNativeClientTests: XCTestCase {
     func testV4AcceptedPollsAndSurfacesCertifiedDone() async throws {
         let root = BLSTKey(seed: 25)
         let config = try configuration(root: root.derPublicKey)
-        let identity = try makeAuthSession(config: config)
+        let canister = try XCTUnwrap(ICPrincipal.parse(canisterText))
+        let identity = try makeAuthSession(config: config, targets: [canister])
         let lock = NSLock()
         var updateRequestID: Data?
         URLProtocolStub.handler = { request in
@@ -553,7 +542,12 @@ final class ICNativeClientTests: XCTestCase {
             return response(request, status: 200, body: readStateResponse(certificate))
         }
         await XCTAssertThrowsErrorAsync(
-            try await client(config).callRaw(method: "accepted", identity: identity)
+            try await client(config).callRaw(
+                method: "accepted",
+                canisterId: "aaaaa-aa",
+                effectiveCanisterId: canisterText,
+                identity: identity
+            )
         ) { error in
             XCTAssertEqual(error as? ICClientError, .requestDoneWithoutReply)
         }
@@ -562,7 +556,8 @@ final class ICNativeClientTests: XCTestCase {
     func testV2AcceptedPollsAndReturnsCertifiedReply() async throws {
         let root = BLSTKey(seed: 26)
         let config = try configuration(root: root.derPublicKey)
-        let identity = try makeAuthSession(config: config)
+        let canister = try XCTUnwrap(ICPrincipal.parse(canisterText))
+        let identity = try makeAuthSession(config: config, targets: [canister])
         let lock = NSLock()
         var updateRequestID: Data?
         URLProtocolStub.handler = { request in
@@ -583,8 +578,29 @@ final class ICNativeClientTests: XCTestCase {
             ], key: root)
             return response(request, status: 200, body: readStateResponse(certificate))
         }
-        let reply = try await client(config).callRaw(method: "accepted-v2", identity: identity)
+        let reply = try await client(config).callRaw(
+            method: "accepted-v2",
+            canisterId: "aaaaa-aa",
+            effectiveCanisterId: canisterText,
+            identity: identity
+        )
         XCTAssertEqual(reply, Data("v2 reply".utf8))
+    }
+
+    func testManagementCallRejectsDelegationScopedOnlyToManagementCanister() async throws {
+        let config = try configuration(root: BLSTKey(seed: 29).derPublicKey)
+        let managementCanister = try XCTUnwrap(ICPrincipal.parse("aaaaa-aa"))
+        let identity = try makeAuthSession(config: config, targets: [managementCanister])
+        URLProtocolStub.handler = { request in
+            XCTFail("A request with the wrong delegation target must not reach the network.")
+            return response(request, status: 500, body: Data())
+        }
+        await XCTAssertThrowsErrorAsync(try await client(config).callRaw(
+            method: "stop_canister",
+            canisterId: "aaaaa-aa",
+            effectiveCanisterId: canisterText,
+            identity: identity
+        ))
     }
 
     func testResponseLimitStopsBeforeBodyAcceptance() async throws {
@@ -642,7 +658,7 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertLessThan(elapsed, .seconds(5), "100 BLS verifications took \(elapsed)")
     }
 
-    func testICRC167DefaultRequestUsesEightHourTTLAndFragmentOnly() throws {
+    func testICRC167DefaultRequestUsesThirtyDayTTLAndFragmentOnly() throws {
         let config = try configuration(root: BLSTKey(seed: 18).derPublicKey)
         let pending = try ICRC167Codec.makePendingRequest(requestedAt: Date())
         let callback = URL(string: "https://app.example/ios-auth-callback")!
@@ -651,9 +667,10 @@ final class ICNativeClientTests: XCTestCase {
         let fields = try ICRC167Codec.parseFormEncoded(try XCTUnwrap(components.percentEncodedFragment))
         let request = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(fields["message"]!.utf8)) as? [String: Any])
         let parameters = try XCTUnwrap(request["params"] as? [String: Any])
-        XCTAssertEqual(pending.maxTimeToLiveNanoseconds, 28_800_000_000_000)
-        XCTAssertEqual(parameters["maxTimeToLive"] as? String, "28800000000000")
+        XCTAssertEqual(pending.maxTimeToLiveNanoseconds, 2_592_000_000_000_000)
+        XCTAssertEqual(parameters["maxTimeToLive"] as? String, "2592000000000000")
         XCTAssertEqual(parameters["icrc95DerivationOrigin"] as? String, config.derivationOrigin)
+        XCTAssertNil(parameters["targets"])
         XCTAssertNotEqual(pending.requestID, pending.state)
         XCTAssertEqual(fields["callback"], callback.absoluteString)
         XCTAssertFalse(url.absoluteString.contains("native-auth"))
@@ -691,7 +708,7 @@ final class ICNativeClientTests: XCTestCase {
             XCTAssertThrowsError(try ICRC167Codec.validateReturnedCallbackURL(URL(string: raw)!, expected: expected))
         }
         XCTAssertThrowsError(try ICRC167Codec.validateCallbackURL(URL(string: "https://app.example/ios-auth-callback#old")!))
-        XCTAssertNoThrow(try ICRC167Codec.validateCallbackURL(URL(string: "https://app.example/native-auth-callback")!))
+        XCTAssertThrowsError(try ICRC167Codec.validateCallbackURL(URL(string: "https://app.example/native-auth-callback")!))
         XCTAssertThrowsError(try ICRC167Codec.validateCallbackURL(URL(string: "https://app.example")!))
     }
 
@@ -767,12 +784,33 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertEqual(session.requestedAt, pending.requestedAt)
     }
 
-    func testMalformedKeychainSessionIsPreservedAndRejected() throws {
+    func testLegacyKeychainSessionIsDeletedAndRequestsReauthentication() throws {
         let config = try configuration(root: BLSTKey(seed: 24).derPublicKey)
         let keychain = MockKeychain(data: Data(#"{"identityProvider":"https://id.ai/#authorize"}"#.utf8))
         let store = ICIdentityStore(configuration: config, service: "test", account: "legacy", keychain: keychain)
-        XCTAssertThrowsError(try store.load())
-        XCTAssertNotNil(keychain.data)
+        XCTAssertNil(try store.load())
+        XCTAssertNil(keychain.data)
+    }
+
+    func testLegacyKeychainDeletionFailureAndCurrentCorruptionRemainVisible() throws {
+        let config = try configuration(root: BLSTKey(seed: 30).derPublicKey)
+        let legacy = MockKeychain(data: Data(#"{"identityProvider":"https://id.ai/#authorize"}"#.utf8))
+        legacy.deleteStatus = errSecInteractionNotAllowed
+        let legacyStore = ICIdentityStore(configuration: config, service: "test", account: "legacy", keychain: legacy)
+        XCTAssertThrowsError(try legacyStore.load()) { error in
+            XCTAssertEqual(error as? ICClientError, .keychainFailure(errSecInteractionNotAllowed))
+        }
+        XCTAssertNotNil(legacy.data)
+
+        let malformedCurrentData = try JSONSerialization.data(withJSONObject: [
+            "formatVersion": ICAuthSession.currentFormatVersion
+        ])
+        let malformedCurrent = MockKeychain(data: malformedCurrentData)
+        let currentStore = ICIdentityStore(configuration: config, service: "test", account: "current", keychain: malformedCurrent)
+        XCTAssertThrowsError(try currentStore.load()) { error in
+            XCTAssertEqual(error as? ICClientError, .invalidIdentity("Stored session could not be decoded."))
+        }
+        XCTAssertNotNil(malformedCurrent.data)
     }
 
     // MARK: Helpers
@@ -1123,6 +1161,7 @@ private final class MockKeychain: ICKeychainAccess, @unchecked Sendable {
     var data: Data?
     var updateStatus: OSStatus = errSecSuccess
     var copyStatus: OSStatus = errSecSuccess
+    var deleteStatus: OSStatus = errSecSuccess
     init(data: Data?) { self.data = data }
     func copyMatching(_ query: CFDictionary, result: UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus {
         guard copyStatus == errSecSuccess else { return copyStatus }
@@ -1140,7 +1179,11 @@ private final class MockKeychain: ICKeychainAccess, @unchecked Sendable {
         if let value = attributes as? [String: Any] { data = value[kSecValueData as String] as? Data }
         return errSecSuccess
     }
-    func delete(_ query: CFDictionary) -> OSStatus { data = nil; return errSecSuccess }
+    func delete(_ query: CFDictionary) -> OSStatus {
+        guard deleteStatus == errSecSuccess else { return deleteStatus }
+        data = nil
+        return errSecSuccess
+    }
 }
 
 private func response(_ request: URLRequest, status: Int, body: Data) -> (HTTPURLResponse, Data) {

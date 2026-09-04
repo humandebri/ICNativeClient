@@ -3,7 +3,7 @@ import Foundation
 import Security
 
 public struct ICAuthSession: Equatable, Sendable {
-    public static let currentFormatVersion = 3
+    public static let currentFormatVersion = 4
 
     public var formatVersion: Int { storage.formatVersion }
     public var principal: String { storage.principal }
@@ -137,8 +137,10 @@ public final class ICIdentityStore {
         do {
             stored = try JSONDecoder().decode(ICStoredAuthSession.self, from: data)
         } catch {
-            // A malformed item is still a registered credential. Preserve it for
-            // diagnosis/recovery and distinguish it from an absent credential.
+            if Self.isLegacySessionData(data) {
+                try clear()
+                return nil
+            }
             throw ICClientError.invalidIdentity("Stored session could not be decoded.")
         }
         let session = ICAuthSession(storage: stored)
@@ -148,7 +150,19 @@ public final class ICIdentityStore {
 
     public func save(_ session: ICAuthSession) throws {
         try ICIdentityValidation.validateSession(session, configuration: configuration)
-        let data = try JSONEncoder().encode(session.storage)
+        let storage = session.storage.formatVersion == ICAuthSession.currentFormatVersion ? session.storage : ICStoredAuthSession(
+            formatVersion: ICAuthSession.currentFormatVersion,
+            principal: session.storage.principal,
+            canisterId: session.storage.canisterId,
+            internetIdentityURL: session.storage.internetIdentityURL,
+            derivationOrigin: session.storage.derivationOrigin,
+            sessionPublicKey: session.storage.sessionPublicKey,
+            sessionPrivateKey: session.storage.sessionPrivateKey,
+            delegation: session.storage.delegation,
+            requestedAt: session.storage.requestedAt,
+            maxTimeToLiveNanoseconds: session.storage.maxTimeToLiveNanoseconds
+        )
+        let data = try JSONEncoder().encode(storage)
         let updates: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrAccessible as String: Self.keychainAccessibility,
@@ -179,6 +193,37 @@ public final class ICIdentityStore {
             kSecAttrAccount as String: account,
         ]
     }
+
+    private static func isLegacySessionData(_ data: Data) -> Bool {
+        guard let value = try? JSONSerialization.jsonObject(with: data),
+              let fields = value as? [String: Any] else {
+            return false
+        }
+        return fields["formatVersion"] == nil && fields["identityProvider"] != nil
+    }
+}
+
+/// Serializes access to one Keychain-backed Internet Identity session and renews
+/// only an absent or expired delegation. Invalid credentials are never replaced.
+public actor ICSessionProvider {
+    private let store: ICIdentityStore
+
+    public init(store: ICIdentityStore) {
+        self.store = store
+    }
+
+    public func identity(
+        renew: @escaping @MainActor @Sendable () async throws -> ICAuthSession
+    ) async throws -> ICAuthSession {
+        do {
+            if let session = try store.load() { return session }
+        } catch ICClientError.expiredDelegation {
+            // Only expiry is recoverable by requesting a fresh user delegation.
+        }
+        let session = try await renew()
+        try store.save(session)
+        return session
+    }
 }
 
 enum ICRequestPermission {
@@ -198,7 +243,7 @@ enum ICIdentityValidation {
         permission: ICRequestPermission? = nil,
         now: Date = Date()
     ) throws {
-        guard session.storage.formatVersion == ICAuthSession.currentFormatVersion,
+        guard (session.storage.formatVersion == 3 || session.storage.formatVersion == ICAuthSession.currentFormatVersion),
               session.canisterId == configuration.canisterId,
               session.internetIdentityURL == configuration.internetIdentityURL.absoluteString,
               session.derivationOrigin == configuration.derivationOrigin,

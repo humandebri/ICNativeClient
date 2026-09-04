@@ -2,7 +2,6 @@ import CryptoKit
 import Foundation
 
 public final class ICClient: @unchecked Sendable {
-    private static let requestTimeout: TimeInterval = 20
     private let session: URLSession
     private let subnetCache = ICSubnetCache()
     public let configuration: ICClientConfiguration
@@ -63,8 +62,8 @@ public final class ICClient: @unchecked Sendable {
         guard let target = ICPrincipal.parse(targetText), let effective = ICPrincipal.parse(effectiveText) else {
             throw ICClientError.invalidCanisterId
         }
-        // Delegation targets constrain the content canister, while certificate ranges constrain routing.
-        try validateIdentityForRequest(identity, requestCanisterId: targetText, permission: .call)
+        // Management-canister authorization and certificate routing both use the effective canister.
+        try validateIdentityForRequest(identity, requestCanisterId: effectiveText, permission: .call)
         let content = requestContent(type: "call", canister: target, method: method, arg: arg, identity: identity)
         let requestID = ICRequestID.hash(of: content)
         let envelope = try Self.signedEnvelope(content: content, identity: identity)
@@ -115,16 +114,17 @@ public final class ICClient: @unchecked Sendable {
         requestId: Data,
         canisterId: String? = nil,
         identity: ICAuthSession,
-        attempts: Int = 30
+        attempts: Int? = nil
     ) async throws -> Data {
         let effectiveText = canisterId ?? configuration.canisterId
-        guard requestId.count == 32, let effective = ICPrincipal.parse(effectiveText), attempts > 0 else {
+        let selectedAttempts = attempts ?? configuration.network.maximumPollAttempts
+        guard requestId.count == 32, let effective = ICPrincipal.parse(effectiveText), selectedAttempts > 0 else {
             throw ICClientError.invalidConfiguration("Poll requires a 32-byte request ID and at least one attempt.")
         }
         try validateIdentityForRequest(identity, requestCanisterId: effectiveText, permission: .readState)
         let url = try apiURL(for: "read_state", canisterId: effectiveText)
-        for _ in 0..<attempts {
-            try await Task.sleep(for: .seconds(1))
+        for _ in 0..<selectedAttempts {
+            try await Task.sleep(for: configuration.network.pollInterval)
             let content = readStateContent(
                 paths: [[Data("request_status".utf8), requestId]],
                 identity: identity
@@ -375,7 +375,7 @@ public final class ICClient: @unchecked Sendable {
     private func postCBOR(_ body: Data, to url: URL, operation: String) async throws -> (Data, HTTPURLResponse) {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = Self.requestTimeout
+        request.timeoutInterval = configuration.network.requestTimeout
         request.setValue("application/cbor", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
         do {

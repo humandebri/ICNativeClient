@@ -12,16 +12,16 @@ All notable changes are documented here.
 - Verified query node signatures with a one-hour certified subnet-key cache.
 - Strict CBOR parsing, response-size limits, structured rejects, and ICRC-167 native authentication.
 - OSS governance, security, third-party notice, and CI files.
-- The 0.3.0 authorization timeout, task cancellation, explicit callback path, shared/ephemeral browser selection, and safe base64 URL transport.
+- Authorization timeout, task cancellation, shared/ephemeral browser selection, and strict ICRC-167 URL-fragment transport.
 
 ### Changed
 
 - `ICClientConfiguration` now has a throwing initializer and validates all security-relevant inputs.
 - `queryRaw`, `callRaw`, and `poll` now verify responses before returning them.
-- The default Internet Identity session TTL is 8 hours; callers may explicitly request up to 30 days.
+- The default Internet Identity session TTL is 30 days; callers may explicitly request a shorter lifetime.
 - Session private keys are no longer exposed through the public `ICAuthSession` API.
-- Keychain loading returns `nil` only for an absent item; operational and malformed-data errors are thrown without deleting the stored session.
+- Keychain loading discards detected 0.1.x sessions and returns `nil`; operational and malformed current-format errors remain visible without deleting stored bytes.
 
 ### Removed
 
-- The former `identityProvider`, bridge-based native-auth API, and implicit unverified query behavior.
+- The former `identityProvider`, domain/path and bridge-based native-auth APIs, and implicit unverified query behavior.

@@ -1,0 +1,40 @@
+name: ICNativeClientIOSHarness
+options:
+  deploymentTarget:
+    iOS: "17.4"
+packages:
+  ICNativeClient:
+    path: ${ICNATIVECLIENT_ROOT}
+targets:
+  ICNativeClientIOSHarness:
+    type: application
+    platform: iOS
+    sources: [App.swift]
+    dependencies:
+      - package: ICNativeClient
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ICNativeClientIOSHarness
+        CODE_SIGNING_ALLOWED: NO
+        GENERATE_INFOPLIST_FILE: YES
+  ICNativeClientIOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [AuthenticatorLifecycleTests.swift]
+    dependencies:
+      - target: ICNativeClientIOSHarness
+      - package: ICNativeClient
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.ICNativeClientIOSTests
+        CODE_SIGNING_ALLOWED: NO
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  ICNativeClientIOS:
+    build:
+      targets:
+        ICNativeClientIOSHarness: all
+        ICNativeClientIOSTests: [test]
+    test:
+      targets:
+        - ICNativeClientIOSTests

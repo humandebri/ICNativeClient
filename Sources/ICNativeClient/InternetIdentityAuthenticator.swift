@@ -6,6 +6,18 @@ import Foundation
 import UIKit
 
 @available(iOS 17.4, *)
+@MainActor
+protocol ICWebAuthenticationSession: AnyObject {
+    var presentationContextProvider: (any ASWebAuthenticationPresentationContextProviding)? { get set }
+    var prefersEphemeralWebBrowserSession: Bool { get set }
+    func start() -> Bool
+    func cancel()
+}
+
+@available(iOS 17.4, *)
+extension ASWebAuthenticationSession: ICWebAuthenticationSession { }
+
+@available(iOS 17.4, *)
 public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticationPresentationContextProviding {
     public nonisolated static let defaultAuthorizationTimeout: Duration = .seconds(330)
     public static let callbackPath = ICRC167Codec.callbackPath
@@ -14,12 +26,36 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
     private let configuration: ICClientConfiguration
     private let callbackURL: URL
     private let maxTimeToLiveNanoseconds: UInt64
+    private let sessionFactory: @MainActor (
+        URL,
+        ASWebAuthenticationSession.Callback,
+        @escaping (URL?, Error?) -> Void
+    ) -> any ICWebAuthenticationSession
     @MainActor private var activeAttempt: AuthorizationAttempt?
 
-    public init(
+    public convenience init(
         configuration: ICClientConfiguration,
         callbackURL: URL,
         maxTimeToLiveNanoseconds: UInt64? = nil
+    ) throws {
+        try self.init(
+            configuration: configuration,
+            callbackURL: callbackURL,
+            maxTimeToLiveNanoseconds: maxTimeToLiveNanoseconds
+        ) { url, callback, completion in
+            ASWebAuthenticationSession(url: url, callback: callback, completionHandler: completion)
+        }
+    }
+
+    init(
+        configuration: ICClientConfiguration,
+        callbackURL: URL,
+        maxTimeToLiveNanoseconds: UInt64? = nil,
+        sessionFactory: @escaping @MainActor (
+            URL,
+            ASWebAuthenticationSession.Callback,
+            @escaping (URL?, Error?) -> Void
+        ) -> any ICWebAuthenticationSession
     ) throws {
         try ICRC167Codec.validateInternetIdentityURL(configuration.internetIdentityURL)
         try ICRC167Codec.validateCallbackURL(callbackURL)
@@ -31,19 +67,7 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
         self.configuration = configuration
         self.callbackURL = callbackURL
         self.maxTimeToLiveNanoseconds = lifetime
-    }
-
-    public convenience init(
-        configuration: ICClientConfiguration,
-        callbackDomain: String,
-        callbackPath: String,
-        maxTimeToLiveNanoseconds: UInt64? = nil
-    ) throws {
-        try self.init(
-            configuration: configuration,
-            callbackURL: Self.callbackURL(callbackDomain: callbackDomain, callbackPath: callbackPath),
-            maxTimeToLiveNanoseconds: maxTimeToLiveNanoseconds
-        )
+        self.sessionFactory = sessionFactory
     }
 
     @MainActor
@@ -82,10 +106,7 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
                 }
 
                 let attempt = AuthorizationAttempt(continuation: continuation)
-                let session = ASWebAuthenticationSession(
-                    url: authorizationURL,
-                    callback: callback
-                ) { [weak self, weak attempt] returnedURL, error in
+                let session = sessionFactory(authorizationURL, callback) { [weak self, weak attempt] returnedURL, error in
                     Task { @MainActor in
                         guard let self, let attempt else { return }
                         if let error {
@@ -113,6 +134,10 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
                 session.presentationContextProvider = self
                 session.prefersEphemeralWebBrowserSession = prefersEphemeralWebBrowserSession
                 activeAttempt = attempt
+                if Task.isCancelled {
+                    finish(attempt, with: .failure(CancellationError()), cancelSession: true)
+                    return
+                }
                 attempt.timeoutTask = Task { [weak self, weak attempt] in
                     do {
                         try await Task.sleep(for: timeout)
@@ -135,25 +160,6 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
                 self.finish(attempt, with: .failure(CancellationError()), cancelSession: true)
             }
         }
-    }
-
-    public static func callbackURL(callbackDomain: String, callbackPath: String) throws -> URL {
-        guard !callbackDomain.isEmpty,
-              callbackPath.hasPrefix("/"),
-              !callbackPath.hasPrefix("//") else {
-            throw ICClientError.invalidConfiguration("Callback domain and explicit callback path are required.")
-        }
-        var components = URLComponents()
-        components.scheme = "https"
-        components.host = callbackDomain
-        components.path = callbackPath
-        guard let url = components.url,
-              url.host?.lowercased() == callbackDomain.lowercased(),
-              url.path == callbackPath else {
-            throw ICClientError.invalidConfiguration("Callback URL could not be constructed.")
-        }
-        try ICRC167Codec.validateCallbackURL(url)
-        return url
     }
 
     @MainActor
@@ -184,7 +190,7 @@ public final class ICInternetIdentityAuthenticator: NSObject, ASWebAuthenticatio
     @MainActor
     private final class AuthorizationAttempt {
         var continuation: CheckedContinuation<ICAuthSession, Error>?
-        var session: ASWebAuthenticationSession?
+        var session: (any ICWebAuthenticationSession)?
         var timeoutTask: Task<Void, Never>?
 
         init(continuation: CheckedContinuation<ICAuthSession, Error>) {

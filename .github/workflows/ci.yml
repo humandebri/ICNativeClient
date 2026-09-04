@@ -21,6 +21,19 @@ jobs:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v6
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate iOS test harness
+        env:
+          ICNATIVECLIENT_ROOT: ${{ github.workspace }}
+        run: |
+          mkdir -p /tmp/icnativeclient-ios-harness
+          cp Tests/IOSHarness/App.swift /tmp/icnativeclient-ios-harness/App.swift
+          cp Tests/ICNativeClientIOSTests/AuthenticatorLifecycleTests.swift /tmp/icnativeclient-ios-harness/AuthenticatorLifecycleTests.swift
+          xcodegen generate \
+            --spec Tests/IOSHarness/project.yml \
+            --project /tmp/icnativeclient-ios-harness \
+            --project-root /tmp/icnativeclient-ios-harness
       - name: Run iOS Simulator tests
         run: |
           simulator_id="$(
@@ -28,6 +41,14 @@ jobs:
               python3 -c 'import json, sys; devices = json.load(sys.stdin)["devices"]; print(next(device["udid"] for runtime in devices.values() for device in runtime if device.get("isAvailable") and device["name"].startswith("iPhone")))'
           )"
           xcodebuild test \
-            -scheme ICNativeClient \
+            -project /tmp/icnativeclient-ios-harness/ICNativeClientIOSHarness.xcodeproj \
+            -scheme ICNativeClientIOS \
             -destination "platform=iOS Simulator,id=${simulator_id}" \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Build generic iOS destination
+        run: |
+          xcodebuild build \
+            -project /tmp/icnativeclient-ios-harness/ICNativeClientIOSHarness.xcodeproj \
+            -scheme ICNativeClientIOS \
+            -destination 'generic/platform=iOS' \
             CODE_SIGNING_ALLOWED=NO

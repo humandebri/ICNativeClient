@@ -18,15 +18,15 @@ the flow.
 The package sends one `icrc34_delegation` JSON-RPC request in the II URL fragment. It
 requires independent request-id and state matches, consumes each callback once, and
 validates the returned chain's session key, principal, every delegation signature,
-expiration, targets, permissions, cycle/depth/target limits, and content canister scope
-before returning an `ICAuthSession`. The default lifetime is 8 hours; callers may
-explicitly request a longer lifetime up to 30 days.
+expiration, targets, permissions, cycle/depth/target limits, and configured canister scope
+before returning an `ICAuthSession`. The default lifetime is 30 days; callers may
+explicitly request a shorter lifetime.
 
 Authentication itself has a separate 330-second default timeout. Cancelling the calling
 task cancels the active browser session. Shared browser state is used by default so
 passkeys and existing II sessions remain available; callers may explicitly request an
-ephemeral browser session for clean-session testing. Both the `callbackURL` initializer
-and the domain/path initializer require an explicit HTTPS callback path.
+ephemeral browser session for clean-session testing. The initializer requires the exact
+HTTPS callback URL with the fixed `/ios-auth-callback` path.
 
 ## Callback origin contract
 

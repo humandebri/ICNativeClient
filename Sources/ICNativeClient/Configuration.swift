@@ -1,5 +1,24 @@
 import Foundation
 
+public struct ICNetworkConfiguration: Equatable, Sendable {
+    public let requestTimeout: TimeInterval
+    public let pollInterval: Duration
+    public let maximumPollAttempts: Int
+
+    public init(
+        requestTimeout: TimeInterval = 20,
+        pollInterval: Duration = .seconds(1),
+        maximumPollAttempts: Int = 30
+    ) throws {
+        guard requestTimeout > 0, pollInterval > .zero, maximumPollAttempts > 0 else {
+            throw ICClientError.invalidConfiguration("Network timeouts, polling interval, and polling attempts must be positive.")
+        }
+        self.requestTimeout = requestTimeout
+        self.pollInterval = pollInterval
+        self.maximumPollAttempts = maximumPollAttempts
+    }
+}
+
 public enum ICClientAPIVersion: String, Sendable {
     case v2
     case v3
@@ -36,7 +55,7 @@ public enum ICTrustRoot: Equatable, Sendable {
 }
 
 public struct ICClientConfiguration: Equatable, Sendable {
-    public static let defaultDelegationTTLNanoseconds: UInt64 = 28_800_000_000_000
+    public static let defaultDelegationTTLNanoseconds: UInt64 = 2_592_000_000_000_000
     public static let maximumDelegationTTLNanoseconds: UInt64 = 2_592_000_000_000_000
     public static let defaultMaximumResponseBytes = 10 * 1_024 * 1_024
 
@@ -47,6 +66,7 @@ public struct ICClientConfiguration: Equatable, Sendable {
     public let trustRoot: ICTrustRoot
     public let delegationTTLNanoseconds: UInt64
     public let maximumResponseBytes: Int
+    public let network: ICNetworkConfiguration
 
     public init(
         canisterId: String,
@@ -55,7 +75,8 @@ public struct ICClientConfiguration: Equatable, Sendable {
         derivationOrigin: String,
         trustRoot: ICTrustRoot = .mainnet,
         delegationTTLNanoseconds: UInt64 = Self.defaultDelegationTTLNanoseconds,
-        maximumResponseBytes: Int = Self.defaultMaximumResponseBytes
+        maximumResponseBytes: Int = Self.defaultMaximumResponseBytes,
+        network: ICNetworkConfiguration = try! ICNetworkConfiguration()
     ) throws {
         guard ICPrincipal.parse(canisterId) != nil else { throw ICClientError.invalidCanisterId }
         guard let resolvedAPIBaseURL = apiBaseURL ?? URL(string: "https://ic0.app"),
@@ -80,6 +101,7 @@ public struct ICClientConfiguration: Equatable, Sendable {
         self.trustRoot = trustRoot
         self.delegationTTLNanoseconds = delegationTTLNanoseconds
         self.maximumResponseBytes = maximumResponseBytes
+        self.network = network
     }
 
     public func apiURL(
