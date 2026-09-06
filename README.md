@@ -1,6 +1,6 @@
 # ICNativeClient
 
-ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.3 accepts Candid-compatible reply subtype evolution in generated Swift bindings.
+ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.4 restores verified queries to root-subnet canisters, including the ICP Ledger, by deriving the root subnet identity from the trusted root key.
 
 It includes principal/account helpers, a Candid DIDL codec, explicit Swift model conversion, and raw Candid-byte transport.
 
@@ -287,6 +287,14 @@ let sharedStore = ICIdentityStore(
 ```
 
 Every participating target must include that access group in its Keychain Sharing entitlement. ICNativeClient does not migrate items between access groups or from application-specific storage formats. If the shared item is initially absent, authenticate and save the session from the main application before an extension attempts to load it. An invalid access group or missing entitlement is reported as `ICClientError.keychainFailure`.
+
+## New in 0.7.4
+
+0.7.4 is a backward-compatible patch release. Verified queries to root-subnet canisters now derive the root subnet ID from the configured trust root, matching the IC interface specification and preserving custom-network support. Public APIs and wire formats are unchanged, and the bundled generator remains version 0.1.2.
+
+## New in 0.7.3
+
+0.7.3 is a backward-compatible patch release. Generated Swift bindings now accept Candid-compatible reply subtype evolution, including added record fields and compatible optional, vector, numeric, and recursive values, while variants continue to reject unknown cases and incompatible payload changes. Public APIs and wire formats are unchanged, and the bundled generator remains version 0.1.2.
 
 ## New in 0.7.2
 

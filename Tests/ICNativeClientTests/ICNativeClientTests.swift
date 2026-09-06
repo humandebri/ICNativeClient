@@ -663,7 +663,13 @@ final class ICNativeClientTests: XCTestCase {
         let nodeID = Data([0xaa])
         let config = try configuration(root: root.derPublicKey)
         let now = Date()
-        let subnetCertificate = try makeSubnetCertificate(root: root, nodeID: nodeID, node: node, now: now)
+        let subnetCertificate = try makeSubnetCertificate(
+            root: root,
+            nodeID: nodeID,
+            node: node,
+            now: now,
+            additionalSubnetID: Data([0xfe, 0xed])
+        )
         let lock = NSLock()
         var readStateCount = 0
         URLProtocolStub.handler = { request in
@@ -693,6 +699,36 @@ final class ICNativeClientTests: XCTestCase {
         let unsafe = try await client.unsafeQueryRaw(method: "unsafe")
         XCTAssertEqual(unsafe, Data("ok".utf8))
         XCTAssertEqual(lock.withLock { readStateCount }, 1)
+    }
+
+    func testRootSubnetDoesNotFallBackToAnArbitraryCertifiedSubnetEntry() throws {
+        let root = BLSTKey(seed: 35)
+        let node = Curve25519.Signing.PrivateKey()
+        let nodeID = Data([0xdd])
+        let effective = try XCTUnwrap(ICPrincipal.parse(canisterText))
+        let ranges = ICCBOR.encode(.array([.array([.bytes(effective), .bytes(effective)])]))
+        let certificateData = try makeCertificate(leaves: [
+            ([Data("time".utf8)], ICRequestID.leb128(nanoseconds(Date()))),
+            ([Data("subnet".utf8), subnetID, Data("canister_ranges".utf8)], ranges),
+            ([Data("subnet".utf8), subnetID, Data("node".utf8), nodeID, Data("public_key".utf8)], ICRC167Codec.derPublicKey(from: node.publicKey.rawRepresentation)),
+        ], key: root)
+        let trustRoot = ICTrustRoot.custom(root.derPublicKey)
+        let certificate = try ICCertificateVerifier.verify(
+            certificateData: certificateData,
+            effectiveCanisterID: effective,
+            trustRoot: trustRoot
+        )
+
+        XCTAssertThrowsError(try ICCertificateVerifier.subnet(
+            from: certificate,
+            effectiveCanisterID: effective,
+            trustRoot: trustRoot
+        )) { error in
+            XCTAssertEqual(
+                error as? ICClientError,
+                .certificateVerificationFailed("canister ranges are not proven")
+            )
+        }
     }
 
     func testManagementQuerySeparatesRequestAndEffectiveCanisterIDs() async throws {
@@ -1672,14 +1708,23 @@ final class ICNativeClientTests: XCTestCase {
         nodeID: Data,
         node: Curve25519.Signing.PrivateKey,
         now: Date,
-        range: (Data, Data) = (Data(), Data(repeating: 0xff, count: 29))
+        range: (Data, Data) = (Data(), Data(repeating: 0xff, count: 29)),
+        additionalSubnetID: Data? = nil
     ) throws -> Data {
         let ranges = ICCBOR.encode(.array([.array([.bytes(range.0), .bytes(range.1)])]))
-        return try makeCertificate(leaves: [
+        let rootSubnetID = ICPrincipal.selfAuthenticatingPublicKey(root.derPublicKey)
+        var leaves: [([Data], Data)] = [
             ([Data("time".utf8)], ICRequestID.leb128(nanoseconds(now))),
-            ([Data("subnet".utf8), subnetID, Data("canister_ranges".utf8)], ranges),
-            ([Data("subnet".utf8), subnetID, Data("node".utf8), nodeID, Data("public_key".utf8)], ICRC167Codec.derPublicKey(from: node.publicKey.rawRepresentation)),
-        ], key: root)
+            ([Data("subnet".utf8), rootSubnetID, Data("canister_ranges".utf8)], ranges),
+            ([Data("subnet".utf8), rootSubnetID, Data("node".utf8), nodeID, Data("public_key".utf8)], ICRC167Codec.derPublicKey(from: node.publicKey.rawRepresentation)),
+        ]
+        if let additionalSubnetID {
+            leaves.append((
+                [Data("subnet".utf8), additionalSubnetID, Data("node".utf8), nodeID, Data("public_key".utf8)],
+                ICRC167Codec.derPublicKey(from: node.publicKey.rawRepresentation)
+            ))
+        }
+        return try makeCertificate(leaves: leaves, key: root)
     }
 
     private func makeDelegatedCertificate(

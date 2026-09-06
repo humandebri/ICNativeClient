@@ -229,7 +229,8 @@ enum ICCertificateVerifier {
 
     static func subnet(
         from certificate: ICCertificate,
-        effectiveCanisterID: Data
+        effectiveCanisterID: Data,
+        trustRoot: ICTrustRoot
     ) throws -> ICVerifiedSubnet {
         let subnetID: Data
         let authorityTree: ICHashTree
@@ -237,14 +238,8 @@ enum ICCertificateVerifier {
             subnetID = delegation.subnetID
             authorityTree = try ICCertificate(cbor: delegation.certificate).tree
         } else {
-            // Root-subnet responses expose their subnet entry in their own certified tree.
-            let candidates = certificate.tree.labeledLeaves().compactMap { path, _ -> Data? in
-                path.count >= 3 && path[0] == Data("subnet".utf8) ? path[1] : nil
-            }
-            guard let only = Set(candidates).first, Set(candidates).count == 1 else {
-                throw ICClientError.certificateVerificationFailed("subnet identity is unavailable")
-            }
-            subnetID = only
+            // The root subnet principal is self-authenticating from the independently trusted root key.
+            subnetID = ICPrincipal.selfAuthenticatingPublicKey(trustRoot.derEncodedPublicKey)
             authorityTree = certificate.tree
         }
         let ranges = try canisterRanges(in: authorityTree, subnetID: subnetID)
