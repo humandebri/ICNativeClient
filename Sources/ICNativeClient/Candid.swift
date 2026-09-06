@@ -150,25 +150,26 @@ public struct CandidReply: Equatable, Sendable {
 
     public func decode<T: CandidConvertible>(_ type: T.Type = T.self, at index: Int = 0) throws -> T {
         do {
+            let expectedType = try Candid.normalized(T.candidType)
             let projected: CandidValue?
             if values.indices.contains(index) {
                 let typedValue = values[index]
                 projected = try CandidSubtype.project(
                     typedValue.value,
                     actual: typedValue.type,
-                    expected: T.candidType
+                    expected: expectedType
                 )
             } else {
                 projected = try CandidSubtype.project(
                     .null,
                     actual: .null,
-                    expected: T.candidType
+                    expected: expectedType
                 )
             }
             guard let projected else {
                 let reason = values.indices.contains(index)
-                    ? "declared type is not compatible with \(T.candidType)"
-                    : "value is missing and \(T.candidType) does not accept null"
+                    ? "declared type is not compatible with \(expectedType)"
+                    : "value is missing and \(expectedType) does not accept null"
                 throw ICClientError.invalidCandid(reason)
             }
             return try T(candidValue: projected)
