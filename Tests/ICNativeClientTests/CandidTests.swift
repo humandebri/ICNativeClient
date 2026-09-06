@@ -18,6 +18,22 @@ final class CandidTests: XCTestCase {
         XCTAssertEqual(Candid.fieldID("name"), 1_224_700_491)
     }
 
+    func testReplyDecodingUsesCandidTupleAndNumericSubtyping() throws {
+        let reply = CandidReply(values: [
+            try typed(.nat, .nat(CandidNat("42"))),
+            try CandidTypedValue("ignored"),
+        ])
+        XCTAssertEqual(try reply.decode(CandidInt.self).decimal, "42")
+        XCTAssertNil(try reply.decode(UInt64?.self, at: 2))
+        XCTAssertEqual(try reply.decode(CandidNull.self, at: 2), CandidNull())
+        XCTAssertThrowsError(try reply.decode(String.self, at: 2))
+
+        XCTAssertThrowsError(try CandidReply(values: [CandidTypedValue(UInt8(1))]).decode(UInt16.self))
+        XCTAssertThrowsError(try CandidReply(values: [CandidTypedValue(UInt8(1))]).decode(CandidNat.self))
+        XCTAssertThrowsError(try CandidReply(values: [CandidTypedValue(Int8(1))]).decode(Int64.self))
+        XCTAssertThrowsError(try CandidReply(values: [CandidTypedValue(UInt64(1))]).decode(CandidInt.self))
+    }
+
     func testCandidNullConvertibleAndVariantPayload() throws {
         let null = CandidNull()
         try assertFixture(

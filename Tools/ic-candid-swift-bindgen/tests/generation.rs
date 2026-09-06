@@ -20,16 +20,19 @@ fn generates_selected_typed_bindings_deterministically() {
     assert!(first.contains("public func accountBalance("));
     assert!(first.contains("public func transfer("));
     assert!(first.contains("effectiveCanisterId: String? = nil"));
-    assert!(first.contains("identity: ICAuthSession? = nil, effectiveCanisterId: String? = nil"));
+    assert!(first.contains("delegationTargetCanisterId: String? = nil"));
     assert!(first.contains("queryCandid(\n            method: \"account_balance\","));
     assert!(first.contains("effectiveCanisterId: effectiveCanisterId"));
+    assert!(first.contains("delegationTargetCanisterId: delegationTargetCanisterId"));
     assert!(first.contains("public struct LedgerStatusResult: Sendable"));
     assert!(first.contains("public let field0: UInt64"));
     assert!(first.contains("public let field7: String"));
-    assert!(first.contains("enum _ICBindgenSupport"));
-    assert!(first.contains("LedgerCanister._ICBindgenSupport.decode"));
-    assert!(first.contains("declared type is not compatible"));
-    assert!(first.contains("private static func project("));
+    assert!(first.contains("public let value1: String?"));
+    assert!(first.contains("value1: try reply.decode(String?.self, at: 1)"));
+    assert!(first.contains("_ = try await client.queryCandid("));
+    assert!(first.contains("return try reply.decode(LedgerTokens.self)"));
+    assert!(!first.contains("reply.values.count =="));
+    assert!(!first.contains("_ICBindgenSupport"));
     assert!(!first.contains("\nfunc _icBindgenDecode"));
     assert!(!first.contains("func ignored("));
 }
@@ -143,7 +146,7 @@ fn escapes_only_the_completed_canister_client_name() {
     let generated = generate(&temporary.path().join("bindings.toml"), temporary.path()).unwrap();
 
     assert!(generated.contains("public struct SelfCanister: Sendable"));
-    assert!(generated.contains("SelfCanister._ICBindgenSupport.decode"));
+    assert!(generated.contains("return try reply.decode(UInt64.self)"));
     assert!(!generated.contains("`Self`Canister"));
 }
 

@@ -2,6 +2,22 @@
 
 All notable changes are documented here.
 
+## [0.7.5] - 2026-09-06
+
+### Added
+
+- Query APIs and generated query wrappers accept an optional `delegationTargetCanisterId`, independently of the signed `canisterId` and routing `effectiveCanisterId`.
+
+### Fixed
+
+- Target-scoped identities can authorize management-canister queries against the managed canister while preserving `aaaaa-aa` in signed content.
+- Certified subnet-key discovery uses an anonymous read-state request instead of unnecessarily reusing the query identity.
+- Typed reply decoding accepts Candid tuple evolution, record and container subtyping, and `nat <: int`, while rejecting non-Candid fixed-width numeric widening.
+
+### Compatibility
+
+- ICNativeClient 0.7.5 is a source-compatible patch release; the new query argument is optional and wire formats are unchanged. The bundled generator is `ic-candid-swift-bindgen` 0.1.3.
+
 ## [0.7.4] - 2026-09-06
 
 ### Fixed
@@ -16,7 +32,7 @@ All notable changes are documented here.
 
 ### Fixed
 
-- Generated Swift bindings now decode Candid-compatible reply subtypes: reply records may add fields, and compatible optional, vector, numeric, and recursive values are projected to the Swift model's expected type.
+- Generated Swift bindings project reply record extensions and compatible optional, vector, and recursive values to the Swift model's expected type.
 - Generated variants remain strict: unknown or added cases and changed case payload types are rejected rather than silently misdecoded.
 
 ### Compatibility
