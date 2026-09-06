@@ -381,7 +381,11 @@ public final class ICClient: @unchecked Sendable {
             effectiveCanisterID: canister,
             trustRoot: configuration.trustRoot
         )
-        let subnet = try ICCertificateVerifier.subnet(from: certificate, effectiveCanisterID: canister)
+        let subnet = try ICCertificateVerifier.subnet(
+            from: certificate,
+            effectiveCanisterID: canister,
+            trustRoot: configuration.trustRoot
+        )
         await subnetCache.insert(subnet)
         return subnet
     }

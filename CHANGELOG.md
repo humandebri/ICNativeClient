@@ -2,6 +2,16 @@
 
 All notable changes are documented here.
 
+## [0.7.4] - 2026-09-06
+
+### Fixed
+
+- Verified queries to canisters on the root subnet, including the ICP Ledger, now derive the root subnet ID from the independently trusted root key instead of requiring a unique subnet entry in the certified state tree.
+
+### Compatibility
+
+- ICNativeClient 0.7.4 is a backward-compatible patch release with no public API, session, principal, or wire-format changes. The bundled generator remains `ic-candid-swift-bindgen` 0.1.2.
+
 ## [0.7.3] - 2026-09-05
 
 ### Fixed
