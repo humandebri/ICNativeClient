@@ -1,6 +1,6 @@
 # ICNativeClient
 
-ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.4 restores verified queries to root-subnet canisters, including the ICP Ledger, by deriving the root subnet identity from the trusted root key.
+ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.5 fixes target-scoped management queries and aligns typed reply decoding with Candid subtyping and tuple evolution.
 
 It includes principal/account helpers, a Candid DIDL codec, explicit Swift model conversion, and raw Candid-byte transport.
 
@@ -14,7 +14,7 @@ Add the repository as a Swift Package dependency and link the `ICNativeClient` p
 
 ## Candid Swift bindings
 
-`ic-candid-swift-bindgen` 0.1.2 generates typed `CandidConvertible` models and canister clients from checked-in Candid interfaces. The generator uses the Candid parser for the schema and the existing ICNativeClient runtime for DIDL encoding, decoding, verified queries, updates, and authentication.
+`ic-candid-swift-bindgen` 0.1.3 generates typed `CandidConvertible` models and canister clients from checked-in Candid interfaces. The generator uses the Candid parser for the schema and the existing ICNativeClient runtime for DIDL encoding, decoding, verified queries, updates, and authentication.
 
 Add `ICNativeClientBindgenPlugin` to the application target that owns the bindings:
 
@@ -56,7 +56,7 @@ cargo run --release \
 
 Use `ic-candid-swift-bindgen --build-info` to print the CLI version and the SHA-256 of the Rust source, Cargo files, and artifact build script embedded at compile time. Maintainers can run `Tools/ic-candid-swift-bindgen/scripts/verify-artifact-bundle.sh` to confirm that both bundled macOS architectures carry the current build information and generate byte-identical fixture output.
 
-Version 0.1.2 supports booleans, fixed-width integers, arbitrary-precision `nat` and `int`, text, blobs, principals, optionals, vectors, records, variants, positional multi-value method boundaries, numeric field IDs, and self-recursive named records and variants. Reply decoding accepts Candid-compatible record extensions and recursively compatible optional, vector, numeric, and recursive values. Variants remain strict: added or unknown cases and changed payload declarations are rejected. The generator intentionally rejects floats, `reserved`, `empty`, function/service values, one-way methods, recursive aliases, and mutually recursive type groups. Query and composite-query wrappers use the verified query path and expose an optional effective routing canister ID; update methods require an `ICAuthSession` and expose the same routing option.
+Version 0.1.3 supports booleans, fixed-width integers, arbitrary-precision `nat` and `int`, text, blobs, principals, optionals, vectors, records, variants, positional multi-value method boundaries, numeric field IDs, and self-recursive named records and variants. Reply decoding accepts Candid-compatible record extensions and recursively compatible optional, vector, recursive, and `nat`-to-`int` values; fixed-width numeric types must match exactly. Extra reply values are ignored and missing optional or `null` values decode as empty. Variants remain strict: added or unknown cases and changed payload declarations are rejected. The generator intentionally rejects floats, `reserved`, `empty`, function/service values, one-way methods, recursive aliases, and mutually recursive type groups. Query and composite-query wrappers expose optional effective-routing and delegation-target canister IDs; update methods require an `ICAuthSession` and expose the routing option.
 
 ## Trust and verification model
 
@@ -177,11 +177,12 @@ let updateReply = try await client.callRaw(
 Management-canister queries keep `aaaaa-aa` in the signed request content while routing to the subnet that hosts the target canister:
 
 ```swift
-let status = try await client.queryCandid(
-    method: "canister_status",
-    arguments: statusArguments,
+let info = try await client.queryCandid(
+    method: "canister_info",
+    arguments: infoArguments,
     canisterId: "aaaaa-aa",
     effectiveCanisterId: bucketCanisterID,
+    delegationTargetCanisterId: bucketCanisterID,
     identity: identity
 )
 ```
@@ -190,7 +191,7 @@ Certified subnet/node keys are cached for one hour. Consecutive queries routed t
 
 Rejects are exposed as `ICClientError.rejected(ICReject)`, including reject code, message, optional error code, and whether the rejection was certified. A certified `done` status is reported as `requestDoneWithoutReply` rather than as an empty reply.
 
-For management-canister calls, `canisterId` remains the content canister ID used for delegation targets, while `effectiveCanisterId` controls HTTP routing and certificate range authorization.
+`canisterId` is the signed content destination and defaults to the delegation target. `effectiveCanisterId` controls HTTP routing and certificate range authorization. Management-canister queries whose authorization is based on an argument's `canister_id`, such as `canister_info` and `canister_metrics`, must pass that value as `delegationTargetCanisterId` when using a target-scoped identity. Management updates and `list_canisters` continue to authorize the signed management-canister destination, so they do not use this override. Certified subnet-key discovery uses an anonymous `read_state` request because the `/subnet` path is public.
 
 HTTP and polling behavior can be tuned without replacing the transport:
 
@@ -288,13 +289,17 @@ let sharedStore = ICIdentityStore(
 
 Every participating target must include that access group in its Keychain Sharing entitlement. ICNativeClient does not migrate items between access groups or from application-specific storage formats. If the shared item is initially absent, authenticate and save the session from the main application before an extension attempts to load it. An invalid access group or missing entitlement is reported as `ICClientError.keychainFailure`.
 
+## New in 0.7.5
+
+0.7.5 is a backward-compatible patch release. Query APIs and generated query wrappers can explicitly separate the delegation target from the signed and effective canister IDs. Typed reply decoding now follows Candid record, optional, vector, recursive, tuple, and `nat`-to-`int` subtyping without accepting fixed-width numeric widening. The bundled generator is version 0.1.3.
+
 ## New in 0.7.4
 
 0.7.4 is a backward-compatible patch release. Verified queries to root-subnet canisters now derive the root subnet ID from the configured trust root, matching the IC interface specification and preserving custom-network support. Public APIs and wire formats are unchanged, and the bundled generator remains version 0.1.2.
 
 ## New in 0.7.3
 
-0.7.3 is a backward-compatible patch release. Generated Swift bindings now accept Candid-compatible reply subtype evolution, including added record fields and compatible optional, vector, numeric, and recursive values, while variants continue to reject unknown cases and incompatible payload changes. Public APIs and wire formats are unchanged, and the bundled generator remains version 0.1.2.
+0.7.3 is a backward-compatible patch release. Generated Swift bindings added reply projection for record extensions and compatible optional, vector, and recursive values, while variants continue to reject unknown cases and incompatible payload changes. Public APIs and wire formats are unchanged, and the bundled generator remains version 0.1.2.
 
 ## New in 0.7.2
 

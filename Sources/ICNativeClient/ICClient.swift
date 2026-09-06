@@ -37,6 +37,7 @@ public final class ICClient: @unchecked Sendable {
         arg: Data = Data(),
         canisterId: String? = nil,
         effectiveCanisterId: String? = nil,
+        delegationTargetCanisterId: String? = nil,
         identity: ICAuthSession? = nil
     ) async throws -> Data {
         let requestText = canisterId ?? configuration.canisterId
@@ -47,13 +48,14 @@ public final class ICClient: @unchecked Sendable {
             arg: arg,
             requestCanisterId: requestText,
             effectiveCanisterId: effectiveText,
+            delegationTargetCanisterId: delegationTargetCanisterId ?? requestText,
             identity: identity
         )
-        var subnet = try await verifiedSubnet(for: effectiveText, identity: identity, forceRefresh: false)
+        var subnet = try await verifiedSubnet(for: effectiveText, forceRefresh: false)
         do {
             try verify(response: response, requestID: requestID, subnet: subnet)
         } catch {
-            subnet = try await verifiedSubnet(for: effectiveText, identity: identity, forceRefresh: true)
+            subnet = try await verifiedSubnet(for: effectiveText, forceRefresh: true)
             try verify(response: response, requestID: requestID, subnet: subnet)
         }
         return try response.result()
@@ -65,6 +67,7 @@ public final class ICClient: @unchecked Sendable {
         arg: Data = Data(),
         canisterId: String? = nil,
         effectiveCanisterId: String? = nil,
+        delegationTargetCanisterId: String? = nil,
         identity: ICAuthSession? = nil
     ) async throws -> Data {
         let requestText = canisterId ?? configuration.canisterId
@@ -74,6 +77,7 @@ public final class ICClient: @unchecked Sendable {
             arg: arg,
             requestCanisterId: requestText,
             effectiveCanisterId: effectiveText,
+            delegationTargetCanisterId: delegationTargetCanisterId ?? requestText,
             identity: identity
         )
         return try response.result()
@@ -85,6 +89,7 @@ public final class ICClient: @unchecked Sendable {
         arguments: CandidArguments = CandidArguments(),
         canisterId: String? = nil,
         effectiveCanisterId: String? = nil,
+        delegationTargetCanisterId: String? = nil,
         identity: ICAuthSession? = nil
     ) async throws -> CandidReply {
         let bytes = try arguments.encode()
@@ -93,6 +98,7 @@ public final class ICClient: @unchecked Sendable {
             arg: bytes,
             canisterId: canisterId,
             effectiveCanisterId: effectiveCanisterId,
+            delegationTargetCanisterId: delegationTargetCanisterId,
             identity: identity
         )
         return try CandidDecoder().decode(reply)
@@ -103,6 +109,7 @@ public final class ICClient: @unchecked Sendable {
         arguments: CandidArguments = CandidArguments(),
         canisterId: String? = nil,
         effectiveCanisterId: String? = nil,
+        delegationTargetCanisterId: String? = nil,
         identity: ICAuthSession? = nil,
         as outputType: Output.Type = Output.self
     ) async throws -> Output {
@@ -111,11 +118,9 @@ public final class ICClient: @unchecked Sendable {
             arguments: arguments,
             canisterId: canisterId,
             effectiveCanisterId: effectiveCanisterId,
+            delegationTargetCanisterId: delegationTargetCanisterId,
             identity: identity
         )
-        guard reply.values.count == 1 else {
-            throw ICClientError.invalidCandid("typed query expected one reply value, received \(reply.values.count)")
-        }
         return try reply.decode(outputType)
     }
 
@@ -124,6 +129,7 @@ public final class ICClient: @unchecked Sendable {
         argument: Input,
         canisterId: String? = nil,
         effectiveCanisterId: String? = nil,
+        delegationTargetCanisterId: String? = nil,
         identity: ICAuthSession? = nil,
         as outputType: Output.Type = Output.self
     ) async throws -> Output {
@@ -132,6 +138,7 @@ public final class ICClient: @unchecked Sendable {
             arguments: CandidArguments(argument),
             canisterId: canisterId,
             effectiveCanisterId: effectiveCanisterId,
+            delegationTargetCanisterId: delegationTargetCanisterId,
             identity: identity,
             as: outputType
         )
@@ -231,9 +238,6 @@ public final class ICClient: @unchecked Sendable {
             effectiveCanisterId: effectiveCanisterId,
             identity: identity
         )
-        guard reply.values.count == 1 else {
-            throw ICClientError.invalidCandid("typed call expected one reply value, received \(reply.values.count)")
-        }
         return try reply.decode(outputType)
     }
 
@@ -333,6 +337,7 @@ public final class ICClient: @unchecked Sendable {
         arg: Data,
         requestCanisterId: String,
         effectiveCanisterId: String,
+        delegationTargetCanisterId: String,
         identity: ICAuthSession?
     ) async throws -> (ICQueryResponse, Data) {
         guard let canister = ICPrincipal.parse(requestCanisterId),
@@ -342,7 +347,7 @@ public final class ICClient: @unchecked Sendable {
         }
         let content: ICCBOR.Value
         if let identity {
-            try validateIdentityForRequest(identity, requestCanisterId: requestCanisterId, permission: .query)
+            try validateIdentityForRequest(identity, requestCanisterId: delegationTargetCanisterId, permission: .query)
             content = requestContent(type: "query", canister: canister, method: method, arg: arg, identity: identity)
         } else {
             content = anonymousRequestContent(type: "query", canister: canister, method: method, arg: arg)
@@ -361,13 +366,12 @@ public final class ICClient: @unchecked Sendable {
 
     private func verifiedSubnet(
         for canisterText: String,
-        identity: ICAuthSession?,
         forceRefresh: Bool
     ) async throws -> ICVerifiedSubnet {
         guard let canister = ICPrincipal.parse(canisterText) else { throw ICClientError.invalidCanisterId }
         if !forceRefresh, let cached = await subnetCache.value(for: canister) { return cached }
-        let content = readStateContent(paths: [[Data("subnet".utf8)]], identity: identity)
-        let request = try envelope(content: content, identity: identity)
+        let content = readStateContent(paths: [[Data("subnet".utf8)]], identity: nil)
+        let request = try envelope(content: content, identity: nil)
         let (data, response) = try await postCBOR(
             request,
             to: apiURL(for: "read_state", canisterId: canisterText),

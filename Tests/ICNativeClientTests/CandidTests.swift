@@ -18,6 +18,38 @@ final class CandidTests: XCTestCase {
         XCTAssertEqual(Candid.fieldID("name"), 1_224_700_491)
     }
 
+    func testReplyDecodingUsesCandidTupleAndNumericSubtyping() throws {
+        let reply = CandidReply(values: [
+            try typed(.nat, .nat(CandidNat("42"))),
+            try CandidTypedValue("ignored"),
+        ])
+        XCTAssertEqual(try reply.decode(CandidInt.self).decimal, "42")
+        XCTAssertNil(try reply.decode(UInt64?.self, at: 2))
+        XCTAssertEqual(try reply.decode(CandidNull.self, at: 2), CandidNull())
+        XCTAssertThrowsError(try reply.decode(String.self, at: 2))
+
+        XCTAssertThrowsError(try CandidReply(values: [CandidTypedValue(UInt8(1))]).decode(UInt16.self))
+        XCTAssertThrowsError(try CandidReply(values: [CandidTypedValue(UInt8(1))]).decode(CandidNat.self))
+        XCTAssertThrowsError(try CandidReply(values: [CandidTypedValue(Int8(1))]).decode(Int64.self))
+        XCTAssertThrowsError(try CandidReply(values: [CandidTypedValue(UInt64(1))]).decode(CandidInt.self))
+    }
+
+    func testReplyDecodingNormalizesExpectedVariantFieldOrder() throws {
+        let fields = [
+            CandidField(id: 1, type: .text),
+            CandidField(id: 2, type: .null),
+        ]
+        let value = try CandidTypedValue(
+            type: .variant(fields),
+            value: .variant(CandidVariant(fields: fields, tag: 1, value: .text("ok")))
+        )
+
+        XCTAssertEqual(
+            try CandidReply(values: [value]).decode(UnsortedVariant.self),
+            .text("ok")
+        )
+    }
+
     func testCandidNullConvertibleAndVariantPayload() throws {
         let null = CandidNull()
         try assertFixture(
@@ -253,6 +285,44 @@ final class CandidTests: XCTestCase {
 
 private enum CandidLimitsForTests {
     static let maximumDepth = 100
+}
+
+private enum UnsortedVariant: CandidConvertible, Equatable {
+    case text(String)
+    case empty
+
+    static let candidType = CandidType.variant([
+        CandidField(id: 2, type: .null),
+        CandidField(id: 1, type: .text),
+    ])
+
+    init(candidValue: CandidValue) throws {
+        guard case .variant(let variant) = candidValue else {
+            throw ICClientError.invalidCandid("expected variant")
+        }
+        switch variant.tag {
+        case 1:
+            self = .text(try String(candidValue: variant.value))
+        case 2:
+            self = .empty
+        default:
+            throw ICClientError.invalidCandid("unexpected variant tag")
+        }
+    }
+
+    var candidValue: CandidValue {
+        switch self {
+        case .text(let value):
+            return .variant(try! CandidVariant(fields: Self.fields, tag: 1, value: .text(value)))
+        case .empty:
+            return .variant(try! CandidVariant(fields: Self.fields, tag: 2, value: .null))
+        }
+    }
+
+    private static let fields = [
+        CandidField(id: 1, type: .text),
+        CandidField(id: 2, type: .null),
+    ]
 }
 
 private struct Person: CandidConvertible, Equatable {

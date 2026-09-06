@@ -1,11 +1,12 @@
-type CanisterStatusArgs = record {
+type CanisterInfoArgs = record {
   canister_id : principal;
+  num_requested_changes : opt nat64;
 };
 
-type CanisterStatus = record {
-  cycles : nat;
+type CanisterInfo = record {
+  total_num_changes : nat64;
 };
 
 service : {
-  canister_status : (CanisterStatusArgs) -> (CanisterStatus) query;
+  canister_info : (CanisterInfoArgs) -> (CanisterInfo) query;
 };

@@ -15,7 +15,7 @@ type TransferError = variant {
 service : {
   account_balance : (record { account : blob }) -> (Tokens) query;
   transfer : (nat64, opt text) -> (variant { ok : nat64; err : TransferError });
-  status : () -> (nat64, text) query;
+  status : () -> (nat64, opt text) query;
   ignored : () -> (bool) query;
   walk : (Node) -> (Node) query;
   numeric_fields : (record { 0 : nat64; 7 : text }) -> () query;

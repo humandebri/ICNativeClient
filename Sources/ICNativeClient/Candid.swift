@@ -149,11 +149,30 @@ public struct CandidReply: Equatable, Sendable {
     }
 
     public func decode<T: CandidConvertible>(_ type: T.Type = T.self, at index: Int = 0) throws -> T {
-        guard values.indices.contains(index) else {
-            throw ICClientError.invalidCandid("reply value \(index) is missing")
-        }
         do {
-            return try T(candidValue: values[index].value)
+            let expectedType = try Candid.normalized(T.candidType)
+            let projected: CandidValue?
+            if values.indices.contains(index) {
+                let typedValue = values[index]
+                projected = try CandidSubtype.project(
+                    typedValue.value,
+                    actual: typedValue.type,
+                    expected: expectedType
+                )
+            } else {
+                projected = try CandidSubtype.project(
+                    .null,
+                    actual: .null,
+                    expected: expectedType
+                )
+            }
+            guard let projected else {
+                let reason = values.indices.contains(index)
+                    ? "declared type is not compatible with \(expectedType)"
+                    : "value is missing and \(expectedType) does not accept null"
+                throw ICClientError.invalidCandid(reason)
+            }
+            return try T(candidValue: projected)
         } catch {
             throw Candid.contextual(error, "reply value \(index)")
         }

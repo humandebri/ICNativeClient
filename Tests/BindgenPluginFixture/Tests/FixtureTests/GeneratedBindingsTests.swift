@@ -3,6 +3,14 @@ import ICNativeClient
 import XCTest
 
 final class GeneratedBindingsTests: XCTestCase {
+    private func decode<T: CandidConvertible>(
+        _ typedValue: CandidTypedValue,
+        as type: T.Type,
+        context _: String
+    ) throws -> T {
+        try CandidReply(values: [typedValue]).decode(type)
+    }
+
     func testGeneratedRecordAndVariantRoundTrip() throws {
         let entry = FixtureEntry(id: 42, label: "generated")
         let entryReply = try CandidDecoder().decode(CandidArguments(entry).encode())
@@ -59,7 +67,7 @@ final class GeneratedBindingsTests: XCTestCase {
             label: .text("compatible"),
             future: .bool(true),
         ])
-        let entry = try SelfCanister._ICBindgenSupport.decode(
+        let entry = try decode(
             CandidTypedValue(type: .record(expandedEntryFields), value: expandedEntry),
             as: FixtureEntry.self,
             context: "record"
@@ -67,7 +75,7 @@ final class GeneratedBindingsTests: XCTestCase {
         XCTAssertEqual(entry.id, 42)
         XCTAssertEqual(entry.label, "compatible")
 
-        let vector = try SelfCanister._ICBindgenSupport.decode(
+        let vector = try decode(
             CandidTypedValue(
                 type: .vector(.record(expandedEntryFields)),
                 value: .vector(.record(expandedEntryFields), [expandedEntry])
@@ -77,7 +85,7 @@ final class GeneratedBindingsTests: XCTestCase {
         )
         XCTAssertEqual(vector.map(\.label), ["compatible"])
 
-        let optional = try SelfCanister._ICBindgenSupport.decode(
+        let optional = try decode(
             CandidTypedValue(type: .record(expandedEntryFields), value: expandedEntry),
             as: FixtureEntry?.self,
             context: "optional"
@@ -95,7 +103,7 @@ final class GeneratedBindingsTests: XCTestCase {
             Candid.fieldID("next"): .optional(.reference(recursiveID), nil),
             future: .bool(true),
         ])
-        let recursive = try SelfCanister._ICBindgenSupport.decode(
+        let recursive = try decode(
             CandidTypedValue(
                 type: .recursive(id: recursiveID, body: .record(recursiveFields)),
                 value: recursiveValue
@@ -107,29 +115,28 @@ final class GeneratedBindingsTests: XCTestCase {
         XCTAssertNil(recursive.next)
     }
 
-    func testGeneratedDecoderSupportsNumericAndOptionalCandidSubtypes() throws {
+    func testGeneratedDecoderAllowsOnlyCandidNumericSubtyping() throws {
         XCTAssertEqual(
-            try SelfCanister._ICBindgenSupport.decode(
-                CandidTypedValue(type: .nat64, value: .nat64(42)),
+            try decode(
+                CandidTypedValue(type: .nat, value: .nat(try CandidNat("42"))),
                 as: CandidInt.self,
                 context: "numeric"
             ).decimal,
             "42"
         )
-        XCTAssertEqual(
-            try SelfCanister._ICBindgenSupport.decode(
+        XCTAssertThrowsError(
+            try decode(
                 CandidTypedValue(type: .nat8, value: .nat8(42)),
-                as: UInt64?.self,
-                context: "optional numeric"
-            ),
-            42
+                as: UInt64.self,
+                context: "fixed-width widening"
+            )
         )
-        XCTAssertNil(try SelfCanister._ICBindgenSupport.decode(
+        XCTAssertNil(try decode(
             CandidTypedValue(type: .text, value: .text("not a nat")),
             as: UInt64?.self,
             context: "optional fallback"
         ))
-        XCTAssertNil(try SelfCanister._ICBindgenSupport.decode(
+        XCTAssertNil(try decode(
             CandidTypedValue(type: .optional(.text), value: .optional(.text, .text("not a nat"))),
             as: UInt64?.self,
             context: "optional nested fallback"
@@ -142,7 +149,7 @@ final class GeneratedBindingsTests: XCTestCase {
             CandidField(id: Candid.fieldID("err"), type: .text),
             CandidField(id: Candid.fieldID("future"), type: .null),
         ]
-        XCTAssertThrowsError(try SelfCanister._ICBindgenSupport.decode(
+        XCTAssertThrowsError(try decode(
             CandidTypedValue(
                 type: .variant(expandedVariantFields),
                 value: .variant(try CandidVariant(
@@ -159,7 +166,7 @@ final class GeneratedBindingsTests: XCTestCase {
             CandidField(id: Candid.fieldID("ok"), type: .null),
             CandidField(id: Candid.fieldID("err"), type: .nat64),
         ]
-        XCTAssertThrowsError(try SelfCanister._ICBindgenSupport.decode(
+        XCTAssertThrowsError(try decode(
             CandidTypedValue(
                 type: .variant(changedVariantFields),
                 value: .variant(try CandidVariant(
@@ -175,7 +182,7 @@ final class GeneratedBindingsTests: XCTestCase {
         let missingID = Candid.fieldID("id")
         let labelID = Candid.fieldID("label")
         let missingRequiredFields = [CandidField(id: labelID, type: .text)]
-        XCTAssertThrowsError(try SelfCanister._ICBindgenSupport.decode(
+        XCTAssertThrowsError(try decode(
             CandidTypedValue(
                 type: .record(missingRequiredFields),
                 value: .record(missingRequiredFields, [labelID: .text("missing")])
@@ -196,7 +203,7 @@ final class GeneratedBindingsTests: XCTestCase {
             type: .recursive(id: 77, body: .variant(matchingFields)),
             value: .variant(CandidVariant(fields: matchingFields, tag: endID, value: .null))
         )
-        guard case .end = try SelfCanister._ICBindgenSupport.decode(
+        guard case .end = try decode(
             matching,
             as: FixtureChain.self,
             context: "test"
@@ -213,7 +220,7 @@ final class GeneratedBindingsTests: XCTestCase {
             value: .variant(CandidVariant(fields: differentFields, tag: endID, value: .null))
         )
         XCTAssertThrowsError(
-            try SelfCanister._ICBindgenSupport.decode(
+            try decode(
                 different,
                 as: FixtureChain.self,
                 context: "test"

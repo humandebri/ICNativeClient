@@ -2,4 +2,4 @@
 name = "Management"
 did = "Candid/management.did"
 canister_id = "aaaaa-aa"
-methods = ["canister_status"]
+methods = ["canister_info"]

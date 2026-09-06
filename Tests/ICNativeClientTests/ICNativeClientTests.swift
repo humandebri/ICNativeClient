@@ -741,7 +741,7 @@ final class ICNativeClientTests: XCTestCase {
         let effective = try XCTUnwrap(ICPrincipal.parse(canisterText))
         let identity = try makeAuthSession(
             config: config,
-            targets: [management],
+            targets: [effective],
             permission: .queries
         )
         let certificate = try makeSubnetCertificate(
@@ -754,11 +754,17 @@ final class ICNativeClientTests: XCTestCase {
         let lock = NSLock()
         var paths: [String] = []
         var requestCanister: Data?
+        var readStateSender: Data?
 
         URLProtocolStub.handler = { request in
             let path = request.url?.path ?? ""
             lock.withLock { paths.append(path) }
             if path.hasSuffix("/read_state") {
+                let content = try requestContent(request)
+                guard case .bytes(let sender) = ICCBOR.mapValue(content, key: "sender") else {
+                    throw ICClientError.invalidResponse("read_state sender")
+                }
+                lock.withLock { readStateSender = sender }
                 return response(request, status: 200, body: readStateResponse(certificate))
             }
             let content = try requestContent(request)
@@ -781,18 +787,50 @@ final class ICNativeClientTests: XCTestCase {
         }
 
         let result = try await client(config).queryRaw(
-            method: "canister_status",
+            method: "canister_info",
             canisterId: managementText,
             effectiveCanisterId: canisterText,
+            delegationTargetCanisterId: canisterText,
             identity: identity
         )
 
         XCTAssertEqual(result, Data("status".utf8))
         XCTAssertEqual(lock.withLock { requestCanister }, management)
+        XCTAssertEqual(lock.withLock { readStateSender }, Data([0x04]))
         XCTAssertEqual(lock.withLock { paths }, [
             "/api/v3/canister/\(canisterText)/query",
             "/api/v3/canister/\(canisterText)/read_state",
         ])
+    }
+
+    func testManagementQueryDefaultsDelegationTargetToSignedCanisterID() async throws {
+        let config = try configuration(root: BLSTKey(seed: 35).derPublicKey)
+        let managementText = "aaaaa-aa"
+        let effective = try XCTUnwrap(ICPrincipal.parse(canisterText))
+        let identity = try makeAuthSession(
+            config: config,
+            targets: [effective],
+            permission: .queries
+        )
+        let lock = NSLock()
+        var requests = 0
+        URLProtocolStub.handler = { request in
+            lock.withLock { requests += 1 }
+            return response(request, status: 500, body: Data())
+        }
+
+        await XCTAssertThrowsErrorAsync(try await client(config).unsafeQueryRaw(
+            method: "canister_info",
+            canisterId: managementText,
+            effectiveCanisterId: canisterText,
+            identity: identity
+        )) { error in
+            XCTAssertEqual(
+                error as? ICClientError,
+                .invalidIdentity("Internet Identity session is not valid for this canister.")
+            )
+        }
+        XCTAssertEqual(lock.withLock { requests }, 0)
     }
 
     func testUnsafeManagementQueryUsesEffectiveCanisterIDWithoutChangingContent() async throws {
@@ -819,7 +857,7 @@ final class ICNativeClientTests: XCTestCase {
         }
 
         let result = try await client(config).unsafeQueryRaw(
-            method: "canister_status",
+            method: "canister_info",
             canisterId: managementText,
             effectiveCanisterId: canisterText
         )
@@ -862,7 +900,10 @@ final class ICNativeClientTests: XCTestCase {
         )
         let expectedArgument = try CandidArguments("input").encode()
         let expectedEmptyArguments = try CandidArguments().encode()
-        let encodedReply = try CandidArguments("typed reply").encode()
+        let encodedReply = try CandidArguments([
+            CandidTypedValue("typed reply"),
+            CandidTypedValue(UInt64(99)),
+        ]).encode()
         let lock = NSLock()
         var sentArguments: [Data] = []
         var requestCanisters: [Data] = []
@@ -1005,7 +1046,10 @@ final class ICNativeClientTests: XCTestCase {
         let config = try configuration(root: root.derPublicKey)
         let identity = try makeAuthSession(config: config)
         let expectedArgument = try CandidArguments(UInt64(7)).encode()
-        let encodedReply = try CandidArguments("updated").encode()
+        let encodedReply = try CandidArguments([
+            CandidTypedValue("updated"),
+            CandidTypedValue(UInt64(99)),
+        ]).encode()
         let lock = NSLock()
         var sentArgument: Data?
 
