@@ -202,7 +202,8 @@ public struct CandidDecoder: Sendable {
     public init() {}
 
     public func decode(_ data: Data) throws -> CandidReply {
-        var reader = Binary.Reader(data)
+        let budget = CandidDecodingBudget()
+        var reader = Binary.Reader(data, budget: budget)
         guard try reader.readData(count: 4) == Data("DIDL".utf8) else {
             throw ICClientError.invalidCandid("missing DIDL header")
         }
@@ -210,26 +211,28 @@ public struct CandidDecoder: Sendable {
         guard tableCount <= CandidLimits.maximumTypeTableEntries else {
             throw ICClientError.invalidCandid("type table exceeds limit")
         }
+        try budget.consume(tableCount)
         var wireTable: [WireType] = []
         wireTable.reserveCapacity(tableCount)
         for index in 0..<tableCount {
             wireTable.append(try readDefinition(from: &reader, index: index))
         }
-        try validateReferences(in: wireTable)
-        var cache: [Int: CandidType] = [:]
+        try validateReferences(in: wireTable, budget: budget)
+        var cache: [Int: ResolvedType] = [:]
         let valueCount = try reader.readCount(context: "value list")
         try Binary.checkCollection(valueCount)
+        try budget.consume(valueCount)
         var references: [Int64] = []
         references.reserveCapacity(valueCount)
         for _ in 0..<valueCount { references.append(try reader.readSLEB64()) }
 
-        let types = try references.map { try resolve($0, table: wireTable, cache: &cache, stack: [], depth: 0) }
+        let types = try references.map { try resolve($0, table: wireTable, cache: &cache, stack: [], depth: 0, budget: budget).type }
         var values: [CandidTypedValue] = []
         values.reserveCapacity(types.count)
         for (index, type) in types.enumerated() {
             do {
                 let value = try readValue(of: type, from: &reader, depth: 0)
-                values.append(try CandidTypedValue(type: type, value: value))
+                values.append(try CandidTypedValue(type: type, value: value, budget: budget))
             } catch {
                 throw Candid.contextual(error, "reply value \(index)")
             }
@@ -251,6 +254,7 @@ public struct CandidDecoder: Sendable {
     private func readFields(from reader: inout Binary.Reader, context: String) throws -> [(UInt32, Int64)] {
         let count = try reader.readCount(context: context)
         try Binary.checkCollection(count)
+        try reader.budget.consume(count)
         var fields: [(UInt32, Int64)] = []
         fields.reserveCapacity(count)
         var previous: UInt32?
@@ -265,9 +269,11 @@ public struct CandidDecoder: Sendable {
         return fields
     }
 
-    private func validateReferences(in table: [WireType]) throws {
+    private func validateReferences(in table: [WireType], budget: CandidDecodingBudget) throws {
         for definition in table {
+            try budget.consume()
             for reference in definition.references {
+                try budget.consume()
                 if reference < 0 {
                     guard CandidType(primitiveCode: reference) != nil else {
                         throw ICClientError.invalidCandid("unknown primitive type code \(reference)")
@@ -279,48 +285,75 @@ public struct CandidDecoder: Sendable {
         }
     }
 
+    private struct ResolvedType {
+        let type: CandidType
+        let freeReferences: Set<UInt32>
+        let structuralDepth: Int
+    }
+
     private func resolve(
         _ reference: Int64,
         table: [WireType],
-        cache: inout [Int: CandidType],
+        cache: inout [Int: ResolvedType],
         stack: Set<Int>,
-        depth: Int
-    ) throws -> CandidType {
+        depth: Int,
+        budget: CandidDecodingBudget
+    ) throws -> ResolvedType {
+        try budget.consume()
         guard depth <= CandidLimits.maximumDepth else { throw ICClientError.invalidCandid("type nesting exceeds limit") }
         if reference < 0 {
             guard let type = CandidType(primitiveCode: reference) else {
                 throw ICClientError.invalidCandid("unknown primitive type code \(reference)")
             }
-            return type
+            return ResolvedType(type: type, freeReferences: [], structuralDepth: 0)
         }
         guard reference <= Int64(Int.max), table.indices.contains(Int(reference)) else {
             throw ICClientError.invalidCandid("type reference \(reference) is out of range")
         }
         let index = Int(reference)
         if stack.contains(index) {
-            return .reference(UInt32(index))
+            return ResolvedType(type: .reference(UInt32(index)), freeReferences: [UInt32(index)], structuralDepth: 0)
         }
-        if let cached = cache[index] { return cached }
+        if let cached = cache[index] {
+            guard depth + cached.structuralDepth <= CandidLimits.maximumDepth else {
+                throw ICClientError.invalidCandid("type nesting exceeds limit")
+            }
+            return cached
+        }
         var nextStack = stack
         nextStack.insert(index)
+        var freeReferences = Set<UInt32>()
+        var structuralDepth = 0
+        func child(_ reference: Int64) throws -> CandidType {
+            let resolved = try resolve(reference, table: table, cache: &cache, stack: nextStack, depth: depth + 1, budget: budget)
+            try budget.consume(resolved.freeReferences.count)
+            freeReferences.formUnion(resolved.freeReferences)
+            structuralDepth = max(structuralDepth, 1 + resolved.structuralDepth)
+            return resolved.type
+        }
         let result: CandidType
         switch table[index] {
-        case .optional(let child):
-            result = .optional(try resolve(child, table: table, cache: &cache, stack: nextStack, depth: depth + 1))
-        case .vector(let child):
-            result = .vector(try resolve(child, table: table, cache: &cache, stack: nextStack, depth: depth + 1))
+        case .optional(let reference): result = .optional(try child(reference))
+        case .vector(let reference): result = .vector(try child(reference))
         case .record(let fields):
-            result = .record(try fields.map { CandidField(id: $0.0, type: try resolve($0.1, table: table, cache: &cache, stack: nextStack, depth: depth + 1)) })
+            try budget.consume(fields.count)
+            result = .record(try fields.map { CandidField(id: $0.0, type: try child($0.1)) })
         case .variant(let fields):
-            result = .variant(try fields.map { CandidField(id: $0.0, type: try resolve($0.1, table: table, cache: &cache, stack: nextStack, depth: depth + 1)) })
+            try budget.consume(fields.count)
+            result = .variant(try fields.map { CandidField(id: $0.0, type: try child($0.1)) })
         }
-        let resolved: CandidType
-        if result.freeRecursiveReferences.contains(UInt32(index)) {
-            resolved = .recursive(id: UInt32(index), body: result)
+        let type: CandidType
+        if freeReferences.remove(UInt32(index)) != nil {
+            type = .recursive(id: UInt32(index), body: result)
+            structuralDepth += 1
         } else {
-            resolved = result
+            type = result
         }
-        if resolved.freeRecursiveReferences.isEmpty { cache[index] = resolved }
+        guard depth + structuralDepth <= CandidLimits.maximumDepth else {
+            throw ICClientError.invalidCandid("type nesting exceeds limit")
+        }
+        let resolved = ResolvedType(type: type, freeReferences: freeReferences, structuralDepth: structuralDepth)
+        if freeReferences.isEmpty { cache[index] = resolved }
         return resolved
     }
 
@@ -330,6 +363,7 @@ public struct CandidDecoder: Sendable {
         depth: Int,
         bindings: [UInt32: CandidType] = [:]
     ) throws -> CandidValue {
+        try reader.budget.consume()
         guard depth <= CandidLimits.maximumDepth else { throw ICClientError.invalidCandid("value nesting exceeds limit") }
         switch type {
         case .null: return .null
@@ -366,6 +400,7 @@ public struct CandidDecoder: Sendable {
             return .blob(try reader.readData(count: reader.readCount(context: "blob")))
         case .vector(let child):
             let count = try reader.readCount(context: "vector")
+            try reader.budget.consume(count)
             var values: [CandidValue] = []
             values.reserveCapacity(count)
             for index in 0..<count {
@@ -374,6 +409,7 @@ public struct CandidDecoder: Sendable {
             }
             return .vector(child, values)
         case .record(let fields):
+            try reader.budget.consume(fields.count)
             var values: [UInt32: CandidValue] = [:]
             for field in fields {
                 do { values[field.id] = try readValue(of: field.type, from: &reader, depth: depth + 1, bindings: bindings) }
@@ -388,7 +424,8 @@ public struct CandidDecoder: Sendable {
                 return .variant(try CandidVariant(
                     fields: fields,
                     tag: field.id,
-                    value: readValue(of: field.type, from: &reader, depth: depth + 1, bindings: bindings)
+                    value: readValue(of: field.type, from: &reader, depth: depth + 1, bindings: bindings),
+                    budget: reader.budget
                 ))
             } catch {
                 throw Candid.contextual(error, "variant tag \(field.id)")
@@ -505,19 +542,25 @@ private enum Binary {
         var offset = 0
         var isAtEnd: Bool { offset == data.count }
 
-        init(_ data: Data) { self.data = data }
+        let budget: CandidDecodingBudget
+
+        init(_ data: Data, budget: CandidDecodingBudget) {
+            self.data = data
+            self.budget = budget
+        }
 
         mutating func readByte() throws -> UInt8 {
             guard offset < data.count else { throw ICClientError.invalidCandid("unexpected end of input") }
             defer { offset += 1 }
-            return data[offset]
+            return data[data.index(data.startIndex, offsetBy: offset)]
         }
 
         mutating func readData(count: Int) throws -> Data {
             guard count >= 0, count <= CandidLimits.maximumCollectionElements,
                   offset <= data.count - count else { throw ICClientError.invalidCandid("truncated or oversized value") }
             defer { offset += count }
-            return data.subdata(in: offset..<(offset + count))
+            let start = data.index(data.startIndex, offsetBy: offset)
+            return Data(data[start..<data.index(start, offsetBy: count)])
         }
 
         mutating func readLEBBytes() throws -> [UInt8] {
@@ -537,8 +580,6 @@ private enum Binary {
                 guard index < 10, index < 9 || byte & 0x7e == 0 else { throw ICClientError.invalidCandid("ULEB128 overflows uint64") }
                 value |= UInt64(byte & 0x7f) << (7 * index)
             }
-            var canonical = Data(); Binary.appendULEB(value, to: &canonical)
-            guard Array(canonical) == bytes else { throw ICClientError.invalidCandid("non-canonical ULEB128") }
             return value
         }
 
@@ -556,8 +597,6 @@ private enum Binary {
             } else if let last = bytes.last, last & 0x40 != 0 {
                 value |= -1 << (7 * bytes.count)
             }
-            var canonical = Data(); Binary.appendSLEB(value, to: &canonical)
-            guard Array(canonical) == bytes else { throw ICClientError.invalidCandid("non-canonical SLEB128") }
             return value
         }
 
@@ -694,7 +733,6 @@ private enum BigLEB {
     static func decodeUnsigned(_ bytes: [UInt8]) throws -> String {
         var value = BigUnsigned()
         for byte in bytes.reversed() { value.multiply(by: 128); value.add(UInt32(byte & 0x7f)) }
-        guard unsigned(value.decimal) == bytes else { throw ICClientError.invalidCandid("non-canonical unsigned LEB128") }
         return value.decimal
     }
 
@@ -712,7 +750,6 @@ private enum BigLEB {
         } else {
             decimal = unsignedValue.decimal
         }
-        guard signed(decimal) == bytes else { throw ICClientError.invalidCandid("non-canonical signed LEB128") }
         return decimal
     }
 }

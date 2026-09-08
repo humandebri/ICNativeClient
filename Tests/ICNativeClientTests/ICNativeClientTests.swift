@@ -309,6 +309,81 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertEqual(try ICCertificateVerifier.status(in: done, requestID: requestID), .done)
     }
 
+    func testHashTreeLookupUsesVisibleBoundariesAroundPrunedBranches() throws {
+        let pruned = ICHashTree.pruned(Data(repeating: 0, count: 32))
+        let a = ICHashTree.labeled(Data("a".utf8), .leaf(Data([1])))
+        let c = ICHashTree.labeled(Data("c".utf8), .leaf(Data([3])))
+        XCTAssertEqual(ICHashTree.fork(pruned, c).lookup([Data("z".utf8)]), .absent)
+        XCTAssertEqual(ICHashTree.fork(a, pruned).lookup([Data("0".utf8)]), .absent)
+        XCTAssertEqual(ICHashTree.fork(a, c).lookup([Data("b".utf8)]), .absent)
+        XCTAssertEqual(ICHashTree.fork(pruned, c).lookup([Data("b".utf8)]), .unknown)
+        XCTAssertEqual(ICHashTree.fork(a, pruned).lookup([Data("b".utf8)]), .unknown)
+        XCTAssertEqual(ICHashTree.fork(pruned, c).lookup([Data("c".utf8)]), .found(Data([3])))
+        XCTAssertEqual(ICHashTree.empty.lookup([]), .absent)
+        XCTAssertEqual(pruned.lookup([]), .unknown)
+        XCTAssertEqual(a.lookup([]), .error)
+    }
+
+    func testCertifiedRejectWithoutErrorCodeWithPrunedSibling() throws {
+        let root = BLSTKey(seed: 71)
+        let requestID = Data(repeating: 1, count: 32)
+        let base = [Data("request_status".utf8), requestID]
+        let visible = hashTree([
+            ([Data("time".utf8)], ICRequestID.leb128(nanoseconds(Date()))),
+            (base + [Data("status".utf8)], Data("rejected".utf8)),
+            (base + [Data("reject_code".utf8)], ICRequestID.leb128(4)),
+            (base + [Data("reject_message".utf8)], Data("denied".utf8)),
+        ])
+        let tree: ICCBOR.Value = .array([.unsigned(1), .array([.unsigned(4), .bytes(Data(repeating: 0, count: 32))]), visible])
+        let certificate = try ICCertificateVerifier.verify(
+            certificateData: makeCertificate(treeValue: tree, key: root),
+            effectiveCanisterID: Data(), trustRoot: .custom(root.derPublicKey)
+        )
+        XCTAssertEqual(try ICCertificateVerifier.status(in: certificate, requestID: requestID),
+                       .rejected(ICReject(code: 4, message: "denied", errorCode: nil, isCertified: true)))
+    }
+
+    func testPollContinuesAfterCertifiedAbsenceWithPrunedBranches() async throws {
+        let root = BLSTKey(seed: 72)
+        let config = try configuration(root: root.derPublicKey)
+        let identity = try makeAuthSession(config: config)
+        let requestID = Data(repeating: 1, count: 32)
+        let lock = NSLock()
+        var reads = 0
+        URLProtocolStub.handler = { request in
+            let attempt = lock.withLock { reads += 1; return reads }
+            let certificate: Data
+            if attempt == 1 {
+                let pruned: ICCBOR.Value = .array([.unsigned(4), .bytes(Data(repeating: 0, count: 32))])
+                let neighbors: ICCBOR.Value = .array([.unsigned(1),
+                    .array([.unsigned(2), .bytes(Data(repeating: 0, count: 32)), pruned]),
+                    .array([.unsigned(2), .bytes(Data(repeating: 255, count: 32)), pruned]),
+                ])
+                let tree: ICCBOR.Value = .array([.unsigned(1), pruned,
+                    .array([.unsigned(1),
+                        .array([.unsigned(2), .bytes(Data("request_status".utf8)), neighbors]),
+                        self.hashTree([([Data("time".utf8)], ICRequestID.leb128(self.nanoseconds(Date())))]),
+                    ]),
+                ])
+                certificate = try self.makeCertificate(treeValue: tree, key: root)
+            } else {
+                let base = [Data("request_status".utf8), requestID]
+                certificate = try self.makeCertificate(leaves: [
+                    ([Data("time".utf8)], ICRequestID.leb128(self.nanoseconds(Date()))),
+                    (base + [Data("status".utf8)], Data("replied".utf8)),
+                    (base + [Data("reply".utf8)], Data([42])),
+                ], key: root)
+            }
+            return response(request, status: 200, body: readStateResponse(certificate))
+        }
+        let transport = URLSessionConfiguration.ephemeral
+        transport.protocolClasses = [URLProtocolStub.self]
+        let agent = ICClient(configuration: config, session: URLSession(configuration: transport), sleep: { _ in })
+        let reply = try await agent.poll(requestId: requestID, identity: identity, attempts: 2)
+        XCTAssertEqual(reply, Data([42]))
+        XCTAssertEqual(lock.withLock { reads }, 2)
+    }
+
     func testDelegationValidatesSignaturesBindingTargetsPermissionsAndLimits() throws {
         let bls = BLSTKey(seed: 8)
         let config = try configuration(root: bls.derPublicKey)
@@ -1792,7 +1867,14 @@ final class ICNativeClientTests: XCTestCase {
         key: BLSTKey,
         delegation: (Data, Data)? = nil
     ) throws -> Data {
-        let treeValue = hashTree(leaves)
+        try makeCertificate(treeValue: hashTree(leaves), key: key, delegation: delegation)
+    }
+
+    private func makeCertificate(
+        treeValue: ICCBOR.Value,
+        key: BLSTKey,
+        delegation: (Data, Data)? = nil
+    ) throws -> Data {
         let digest = try ICHashTree(value: treeValue).digest
         let signature = key.sign(Data([0x0d]) + Data("ic-state-root".utf8) + digest)
         var fields: [(ICCBOR.Value, ICCBOR.Value)] = [

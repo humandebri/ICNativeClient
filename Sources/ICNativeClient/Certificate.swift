@@ -83,19 +83,49 @@ indirect enum ICHashTree: Sendable {
         }
     }
 
-    func lookup(_ path: [Data]) -> Lookup {
-        if path.isEmpty {
-            if case .leaf(let value) = self { return .found(value) }
-            if case .pruned = self { return .unknown }
-            return .error
-        }
+    private enum LabelLookup {
+        case before, after, absent, unknown
+        case found(ICHashTree)
+    }
+
+    // IC hash-tree labels are sorted. A visible boundary can prove absence even
+    // when another branch is pruned; an unconstrained pruned branch cannot.
+    private func lookupLabel(_ target: Data) -> LabelLookup {
         switch self {
-        case .empty, .leaf: return .absent
-        case .pruned: return .unknown
         case .labeled(let label, let child):
-            return label == path[0] ? child.lookup(Array(path.dropFirst())) : .absent
+            if target.lexicographicallyPrecedes(label) { return .before }
+            if label.lexicographicallyPrecedes(target) { return .after }
+            return .found(child)
         case .fork(let left, let right):
-            return Self.merge(left.lookup(path), right.lookup(path))
+            switch left.lookupLabel(target) {
+            case .after:
+                let result = right.lookupLabel(target)
+                if case .before = result { return .absent }
+                return result
+            case .unknown:
+                let result = right.lookupLabel(target)
+                if case .before = result { return .unknown }
+                return result
+            case let result: return result
+            }
+        case .pruned: return .unknown
+        case .empty, .leaf: return .absent
+        }
+    }
+
+    func lookup(_ path: [Data]) -> Lookup {
+        guard let first = path.first else {
+            switch self {
+            case .leaf(let value): return .found(value)
+            case .empty: return .absent
+            case .pruned: return .unknown
+            default: return .error
+            }
+        }
+        switch lookupLabel(first) {
+        case .found(let child): return child.lookup(Array(path.dropFirst()))
+        case .unknown: return .unknown
+        case .before, .after, .absent: return .absent
         }
     }
 
@@ -114,15 +144,6 @@ indirect enum ICHashTree: Sendable {
         case .labeled(let label, let child): return child.labeledLeaves(prefix: prefix + [label])
         case .leaf(let value): return [(prefix, value)]
         case .empty, .pruned: return []
-        }
-    }
-
-    private static func merge(_ left: Lookup, _ right: Lookup) -> Lookup {
-        switch (left, right) {
-        case (.error, _), (_, .error), (.found, .found): .error
-        case (.found(let value), _), (_, .found(let value)): .found(value)
-        case (.unknown, _), (_, .unknown): .unknown
-        default: .absent
         }
     }
 
