@@ -2,6 +2,19 @@
 
 All notable changes are documented here.
 
+## [0.7.6] - 2026-09-08
+
+### Fixed
+
+- Bound Candid decoding work across shared-type resolution, normalization, and validation to prevent excessive expansion from small replies. Cached types also retain their nesting depth for limit checks.
+- Decode Candid from `Data` slices without assuming a zero-based index.
+- Accept padded Candid LEB128 encodings while retaining integer overflow, termination, and length checks. Encoded output remains unchanged.
+- Use sorted hash-tree label boundaries to recognize certified absence despite pruned sibling branches, allowing polling to continue and certified rejects without `error_code` to be returned.
+
+### Compatibility
+
+- Public APIs are unchanged. Candid inputs exceeding the fixed internal budget of 1,000,000 work units now throw `ICClientError.invalidCandid`, even if their encoded size is small.
+
 ## [0.7.5] - 2026-09-06
 
 ### Added

@@ -221,10 +221,9 @@ final class CandidTests: XCTestCase {
         XCTAssertEqual(try CandidEncoder().encode(CandidArguments(oneItemList.values)), oneItemFixture)
     }
 
-    func testRejectsMalformedCanonicalReferenceFieldVariantAndLimits() throws {
+    func testRejectsMalformedReferenceFieldVariantAndLimits() throws {
         for hex in [
             "5849444c0000",             // malformed header
-            "4449444c00017d8000",       // non-canonical nat zero
             "4449444c000100",           // type reference outside an empty table
             "4449444c016c02017b017b00", // duplicate record field ID
             "4449444c016c02027b017b00", // descending record field ID
@@ -261,6 +260,107 @@ final class CandidTests: XCTestCase {
         XCTAssertThrowsError(try CandidDecoder().decode(data("4449444c016b01017e01000002"))) { error in
             XCTAssertTrue(String(describing: error).contains("variant tag 1"))
         }
+    }
+
+    func testDecodesDataSlicesAndRejectsTruncatedSlices() throws {
+        let encoded = try CandidArguments("hello").encode()
+        let framed = Data([0xaa, 0xbb]) + encoded + Data([0xcc])
+        let slice = framed.dropFirst(2).dropLast()
+        XCTAssertEqual(slice.startIndex, 2)
+        XCTAssertEqual(try CandidDecoder().decode(slice).decode(String.self), "hello")
+        XCTAssertThrowsError(try CandidDecoder().decode(slice.dropLast()))
+        XCTAssertThrowsError(try CandidDecoder().decode(slice.prefix(3)))
+        XCTAssertThrowsError(try CandidDecoder().decode(slice.dropFirst(slice.count)))
+    }
+
+    func testAcceptsPaddedLEB128AndReencodesCanonically() throws {
+        // Cross-checked with candid 0.10.35. Padding is allowed on the wire.
+        let fixtures = [
+            ("4449444c80008000", "4449444c0000"),
+            ("4449444c0001fd7f8000", "4449444c00017d00"),
+            ("4449444c00017d8100", "4449444c00017d01"),
+            ("4449444c00017cff7f", "4449444c00017c7f"),
+            ("4449444c00017c8000", "4449444c00017c00"),
+            ("4449444c016c0180007f018000", "4449444c016c01007f0100"),
+            ("4449444c000171810061", "4449444c0001710161"),
+        ]
+        for (padded, canonical) in fixtures {
+            let reply = try CandidDecoder().decode(data(padded))
+            XCTAssertEqual(try CandidArguments(reply.values).encode(), data(canonical))
+        }
+        for hex in [
+            "4449444c80", // Unterminated structural integer.
+            "4449444c00017d80", // Unterminated nat.
+            "4449444c" + String(repeating: "80", count: 9) + "02", // UInt64 overflow.
+            "4449444c0001" + String(repeating: "80", count: 9) + "01", // Int64 overflow.
+            "4449444c" + String(repeating: "80", count: 10) + "00", // Structural length limit.
+            "4449444c00017d" + String(repeating: "80", count: 5_000) + "00",
+        ] {
+            XCTAssertThrowsError(try CandidDecoder().decode(data(hex)))
+        }
+        for value in [Int64.min, Int64.max] {
+            let reply = try CandidDecoder().decode(CandidArguments(CandidInt(String(value))).encode())
+            XCTAssertEqual(try reply.decode(CandidInt.self).decimal, String(value))
+        }
+        XCTAssertEqual(
+            try CandidDecoder().decode(CandidArguments(CandidNat(String(UInt64.max))).encode()).decode(CandidNat.self).decimal,
+            String(UInt64.max)
+        )
+    }
+
+    func testDecodingBudgetStopsSharedTypeExpansion() throws {
+        XCTAssertNoThrow(try CandidDecoder().decode(sharedTypeFixture(depth: 10)))
+        for depth in [19, 40] {
+            XCTAssertThrowsError(try CandidDecoder().decode(sharedTypeFixture(depth: depth))) { error in
+                XCTAssertTrue(String(describing: error).contains("decoding work limit exceeded"))
+            }
+        }
+    }
+
+    func testDecodingBudgetIsSharedAcrossReplyValues() throws {
+        // Each null costs six units across resolution, reading and normalization,
+        // plus its slot in the reply; the final value crosses the shared limit.
+        func nulls(_ count: UInt64) -> Data {
+            Data("DIDL".utf8) + Data([0]) + ICRequestID.leb128(count)
+                + Data(repeating: 0x7f, count: Int(count))
+        }
+        XCTAssertEqual(try CandidDecoder().decode(nulls(142_857)).values.count, 142_857)
+        XCTAssertThrowsError(try CandidDecoder().decode(nulls(142_858))) { error in
+            XCTAssertTrue(String(describing: error).contains("decoding work limit exceeded"))
+        }
+        let blob = Data(repeating: 0x55, count: 1_000_000)
+        XCTAssertEqual(try CandidDecoder().decode(CandidArguments(blob).encode()).decode(Data.self), blob)
+    }
+
+    func testCachedTypesStillEnforceDepthLimit() throws {
+        func nestedTypes(_ count: Int) -> Data {
+            func reference(_ value: Int) -> Data {
+                value < 64 ? Data([UInt8(value)]) : Data([UInt8(value) | 0x80, 0])
+            }
+            var bytes = Data("DIDL".utf8) + ICRequestID.leb128(UInt64(count))
+            for index in 0..<count {
+                bytes.append(0x6e)
+                bytes.append(index == 0 ? Data([0x7f]) : reference(index - 1))
+            }
+            bytes.append(ICRequestID.leb128(UInt64(count)))
+            for index in 0..<count { bytes.append(reference(index)) }
+            bytes.append(Data(repeating: 0, count: count))
+            return bytes
+        }
+        XCTAssertNoThrow(try CandidDecoder().decode(nestedTypes(100)))
+        XCTAssertThrowsError(try CandidDecoder().decode(nestedTypes(101))) { error in
+            XCTAssertTrue(String(describing: error).contains("type nesting exceeds limit"))
+        }
+    }
+
+    private func sharedTypeFixture(depth: Int) -> Data {
+        var bytes = Data("DIDL".utf8)
+        bytes.append(contentsOf: [UInt8(depth + 2), 0x6e, 1])
+        for index in 1...depth {
+            bytes.append(contentsOf: [0x6c, 2, 0, UInt8(index + 1), 1, UInt8(index + 1)])
+        }
+        bytes.append(contentsOf: [0x6c, 0, 1, 0, 0])
+        return bytes
     }
 
     private func typed(_ type: CandidType, _ value: CandidValue) throws -> CandidTypedValue {

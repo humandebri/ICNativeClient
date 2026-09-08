@@ -80,7 +80,11 @@ public struct CandidVariant: Equatable, Sendable {
     public let value: CandidValue
 
     public init(fields: [CandidField], tag: UInt32, value: CandidValue) throws {
-        self.fields = try Candid.normalized(fields, context: "variant")
+        try self.init(fields: fields, tag: tag, value: value, budget: nil)
+    }
+
+    init(fields: [CandidField], tag: UInt32, value: CandidValue, budget: CandidDecodingBudget?) throws {
+        self.fields = try Candid.normalized(fields, context: "variant", budget: budget)
         guard self.fields.contains(where: { $0.id == tag }) else {
             throw ICClientError.invalidCandid("variant tag \(tag) is not declared")
         }
@@ -115,9 +119,13 @@ public struct CandidTypedValue: Equatable, Sendable {
     public let value: CandidValue
 
     public init(type: CandidType, value: CandidValue) throws {
-        try Candid.validate(value, as: type, context: "value")
-        self.type = try Candid.normalized(type)
-        self.value = try Candid.normalized(value)
+        try self.init(type: type, value: value, budget: nil)
+    }
+
+    init(type: CandidType, value: CandidValue, budget: CandidDecodingBudget?) throws {
+        try Candid.validate(value, as: type, context: "value", budget: budget)
+        self.type = try Candid.normalized(type, budget: budget)
+        self.value = try Candid.normalized(value, budget: budget)
     }
 
     public init<T: CandidConvertible>(_ value: T) throws {
@@ -253,23 +261,25 @@ public enum Candid {
         name.utf8.reduce(UInt32(0)) { $0 &* 223 &+ UInt32($1) }
     }
 
-    static func normalized(_ type: CandidType) throws -> CandidType {
+    static func normalized(_ type: CandidType, budget: CandidDecodingBudget? = nil) throws -> CandidType {
+        try budget?.consume()
         switch type {
-        case .optional(let child): return .optional(try normalized(child))
-        case .vector(let child): return .vector(try normalized(child))
-        case .record(let fields): return .record(try normalized(fields, context: "record"))
-        case .variant(let fields): return .variant(try normalized(fields, context: "variant"))
-        case .recursive(let id, let body): return .recursive(id: id, body: try normalized(body))
+        case .optional(let child): return .optional(try normalized(child, budget: budget))
+        case .vector(let child): return .vector(try normalized(child, budget: budget))
+        case .record(let fields): return .record(try normalized(fields, context: "record", budget: budget))
+        case .variant(let fields): return .variant(try normalized(fields, context: "variant", budget: budget))
+        case .recursive(let id, let body): return .recursive(id: id, body: try normalized(body, budget: budget))
         case .reference: return type
         default: return type
         }
     }
 
-    static func normalized(_ fields: [CandidField], context: String) throws -> [CandidField] {
+    static func normalized(_ fields: [CandidField], context: String, budget: CandidDecodingBudget? = nil) throws -> [CandidField] {
         guard fields.count <= maximumCollectionElements else {
             throw ICClientError.invalidCandid("\(context) fields exceed limit")
         }
-        let result = try fields.map { CandidField(id: $0.id, type: try normalized($0.type)) }
+        try budget?.consume(fields.count)
+        let result = try fields.map { CandidField(id: $0.id, type: try normalized($0.type, budget: budget)) }
             .sorted { $0.id < $1.id }
         for pair in zip(result, result.dropFirst()) where pair.0.id == pair.1.id {
             throw ICClientError.invalidCandid("duplicate \(context) field ID \(pair.0.id)")
@@ -277,30 +287,33 @@ public enum Candid {
         return result
     }
 
-    static func normalized(_ value: CandidValue) throws -> CandidValue {
+    static func normalized(_ value: CandidValue, budget: CandidDecodingBudget? = nil) throws -> CandidValue {
+        try budget?.consume()
         switch value {
         case .optional(let type, let item):
-            return .optional(try normalized(type), try item.map(normalized))
+            return .optional(try normalized(type, budget: budget), try item.map { try normalized($0, budget: budget) })
         case .vector(let type, let items):
-            return .vector(try normalized(type), try items.map(normalized))
+            try budget?.consume(items.count)
+            return .vector(try normalized(type, budget: budget), try items.map { try normalized($0, budget: budget) })
         case .record(let fields, let values):
-            let fields = try normalized(fields, context: "record")
+            let fields = try normalized(fields, context: "record", budget: budget)
             var result: [UInt32: CandidValue] = [:]
-            for (id, value) in values { result[id] = try normalized(value) }
+            for (id, value) in values { result[id] = try normalized(value, budget: budget) }
             return .record(fields, result)
         case .variant(let variant):
             return .variant(try CandidVariant(
                 fields: variant.fields,
                 tag: variant.tag,
-                value: normalized(variant.value)
+                value: normalized(variant.value, budget: budget),
+                budget: budget
             ))
         default:
             return value
         }
     }
 
-    static func validate(_ value: CandidValue, as type: CandidType, context: String) throws {
-        try validate(value, as: type, context: context, bindings: [:], depth: 0)
+    static func validate(_ value: CandidValue, as type: CandidType, context: String, budget: CandidDecodingBudget? = nil) throws {
+        try validate(value, as: type, context: context, bindings: [:], depth: 0, budget: budget)
     }
 
     private static func validate(
@@ -308,10 +321,12 @@ public enum Candid {
         as type: CandidType,
         context: String,
         bindings: [UInt32: CandidType],
-        depth: Int
+        depth: Int,
+        budget: CandidDecodingBudget?
     ) throws {
+        try budget?.consume()
         guard depth <= 100 else { throw ICClientError.invalidCandid("\(context): value nesting exceeds limit") }
-        let type = try normalized(type)
+        let type = try normalized(type, budget: budget)
         switch (type, value) {
         case (.null, .null), (.bool, .bool), (.nat, .nat), (.int, .int),
              (.nat8, .nat8), (.nat16, .nat16), (.nat32, .nat32), (.nat64, .nat64),
@@ -320,44 +335,44 @@ public enum Candid {
              (.principal, .principal), (.vector(.nat8), .blob):
             return
         case (.optional(let expected), .optional(let declared, let item)):
-            guard try normalized(declared) == expected else { break }
-            if let item { try validate(item, as: expected, context: context, bindings: bindings, depth: depth + 1) }
+            guard try normalized(declared, budget: budget) == expected else { break }
+            if let item { try validate(item, as: expected, context: context, bindings: bindings, depth: depth + 1, budget: budget) }
             return
         case (.vector(let expected), .vector(let declared, let items)):
-            guard try normalized(declared) == expected else { break }
+            guard try normalized(declared, budget: budget) == expected else { break }
             guard items.count <= maximumCollectionElements else {
                 throw ICClientError.invalidCandid("\(context): vector exceeds limit")
             }
             for (index, item) in items.enumerated() {
-                try validate(item, as: expected, context: "\(context) vector element \(index)", bindings: bindings, depth: depth + 1)
+                try validate(item, as: expected, context: "\(context) vector element \(index)", bindings: bindings, depth: depth + 1, budget: budget)
             }
             return
         case (.record(let expected), .record(let declared, let values)):
-            let actual = try normalized(declared, context: "record")
+            let actual = try normalized(declared, context: "record", budget: budget)
             guard actual == expected else { break }
             let expectedIDs = Set(expected.map(\.id))
             guard Set(values.keys) == expectedIDs else {
                 throw ICClientError.invalidCandid("\(context): record values do not match declared fields")
             }
             for field in expected {
-                try validate(values[field.id]!, as: field.type, context: "\(context) record field \(field.id)", bindings: bindings, depth: depth + 1)
+                try validate(values[field.id]!, as: field.type, context: "\(context) record field \(field.id)", bindings: bindings, depth: depth + 1, budget: budget)
             }
             return
         case (.variant(let expected), .variant(let variant)):
             guard variant.fields == expected,
                   let field = expected.first(where: { $0.id == variant.tag }) else { break }
-            try validate(variant.value, as: field.type, context: "\(context) variant tag \(variant.tag)", bindings: bindings, depth: depth + 1)
+            try validate(variant.value, as: field.type, context: "\(context) variant tag \(variant.tag)", bindings: bindings, depth: depth + 1, budget: budget)
             return
         case (.recursive(let id, let body), _):
             var nestedBindings = bindings
             nestedBindings[id] = body
-            try validate(value, as: body, context: context, bindings: nestedBindings, depth: depth)
+            try validate(value, as: body, context: context, bindings: nestedBindings, depth: depth, budget: budget)
             return
         case (.reference(let id), _):
             guard let body = bindings[id] else {
                 throw ICClientError.invalidCandid("\(context): unbound recursive type reference \(id)")
             }
-            try validate(value, as: body, context: context, bindings: bindings, depth: depth + 1)
+            try validate(value, as: body, context: context, bindings: bindings, depth: depth + 1, budget: budget)
             return
         default:
             break
@@ -517,4 +532,17 @@ extension Array: CandidConvertible where Element: CandidConvertible {
         }
     }
     public var candidValue: CandidValue { .vector(Element.candidType, map(\.candidValue)) }
+}
+
+// Shared by every stage of one decode, including normalization and validation.
+final class CandidDecodingBudget {
+    static let maximumWork = 1_000_000
+    private(set) var remaining = maximumWork
+
+    func consume(_ amount: Int = 1) throws {
+        guard amount >= 0, amount <= remaining else {
+            throw ICClientError.invalidCandid("decoding work limit exceeded")
+        }
+        remaining -= amount
+    }
 }

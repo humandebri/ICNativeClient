@@ -1,6 +1,6 @@
 # ICNativeClient
 
-ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.5 fixes target-scoped management queries and aligns typed reply decoding with Candid subtyping and tuple evolution.
+ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.6 bounds Candid decoding work, fixes decoding from Data slices, accepts padded LEB128 encodings, and corrects certified absence handling during polling.
 
 It includes principal/account helpers, a Candid DIDL codec, explicit Swift model conversion, and raw Candid-byte transport.
 
@@ -155,6 +155,10 @@ Use `CandidNull()` for a typed Candid `null`, including payload-free variant cas
 
 `Data` and `[UInt8]` both map to Candid `vec nat8`. Recursive wire types are retained with `CandidType.recursive` and `CandidType.reference`; finite values can be decoded and re-encoded, while the configured nesting limit still rejects excessively deep values.
 
+Candid decoding uses a fixed internal budget of 1,000,000 work units shared across type resolution, normalization, and value validation. It throws `ICClientError.invalidCandid` when that budget is exhausted, including for small inputs with excessive shared-type expansion. Existing depth, type-table, and collection limits still apply; blob and text bytes use their byte-length limits rather than one work unit per byte. Previously accepted inputs that exceed the work budget are now rejected.
+
+The Candid decoder accepts padded LEB128 encodings within the existing integer and length limits, and accepts `Data` slices with nonzero starting indices. Encoding continues to produce the same minimal LEB128 representation.
+
 Use `queryRaw` and `callRaw` when integrating generated bindings or Candid types not represented by this value API. `unsafeQueryRaw` remains the explicit unverified opt-out; there is intentionally no typed unsafe wrapper.
 
 ### Raw transport
@@ -288,6 +292,10 @@ let sharedStore = ICIdentityStore(
 ```
 
 Every participating target must include that access group in its Keychain Sharing entitlement. ICNativeClient does not migrate items between access groups or from application-specific storage formats. If the shared item is initially absent, authenticate and save the session from the main application before an extension attempts to load it. An invalid access group or missing entitlement is reported as `ICClientError.keychainFailure`.
+
+## New in 0.7.6
+
+0.7.6 fixes Candid decoding and certificate lookup without changing public APIs. A fixed internal decoding budget rejects excessive type expansion and value processing, including in small inputs. Candid decoding now accepts Data slices and padded LEB128 encodings; encoded output remains unchanged. Certified absence is recognized using sorted hash-tree boundaries, so pruned sibling branches no longer prevent polling from continuing or certified rejects without an error code from being returned. The bundled generator remains version 0.1.3.
 
 ## New in 0.7.5
 
