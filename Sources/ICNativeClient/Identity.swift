@@ -5,6 +5,57 @@ import Security
 public struct ICAuthSession: Equatable, Sendable {
     public static let currentFormatVersion = 3
 
+    /// Delegates an existing Ed25519 identity to a fresh, expiring session key.
+    /// The 32-byte root private key is not retained in the returned session or its Keychain storage.
+    /// Omitted targets grant access to any canister, as with unscoped Internet Identity sessions.
+    public static func delegating(
+        ed25519PrivateKey: Data,
+        configuration: ICClientConfiguration,
+        options: ICAuthenticationOptions = .default
+    ) throws -> ICAuthSession {
+        guard ed25519PrivateKey.count == 32 else {
+            throw ICClientError.invalidIdentity("An Ed25519 private key must contain 32 bytes.")
+        }
+        let rootKey = try Curve25519.Signing.PrivateKey(rawRepresentation: ed25519PrivateKey)
+        let sessionKey = Curve25519.Signing.PrivateKey()
+        let rootPublicKey = ICRC167Codec.derPublicKey(from: rootKey.publicKey.rawRepresentation)
+        let sessionPublicKey = ICRC167Codec.derPublicKey(from: sessionKey.publicKey.rawRepresentation)
+        let requestedAt = Date()
+        let ttl = options.maxTimeToLiveNanoseconds ?? configuration.delegationTTLNanoseconds
+        let requestedAtNS = UInt64(requestedAt.timeIntervalSince1970 * 1_000_000_000)
+        let (expiration, overflow) = requestedAtNS.addingReportingOverflow(ttl)
+        guard !overflow else { throw ICClientError.invalidPayload }
+        let targets = try options.targets.map { values in
+            try values.map { value -> Data in
+                guard let principal = ICPrincipal.parse(value) else { throw ICClientError.invalidCanisterId }
+                return principal
+            }
+        }
+        let delegation = ICDelegationChain.SignedDelegation.Delegation(
+            publicKey: sessionPublicKey,
+            expiration: expiration,
+            targets: targets
+        )
+        let signature = try rootKey.signature(for: ICIdentityValidation.delegationSignable(delegation))
+        let session = ICAuthSession(storage: ICStoredAuthSession(
+            formatVersion: currentFormatVersion,
+            principal: ICPrincipal.text(from: ICPrincipal.selfAuthenticatingPublicKey(rootPublicKey)),
+            canisterId: configuration.canisterId,
+            internetIdentityURL: configuration.internetIdentityURL.absoluteString,
+            derivationOrigin: configuration.derivationOrigin,
+            sessionPublicKey: sessionPublicKey,
+            sessionPrivateKey: sessionKey.rawRepresentation,
+            delegation: ICDelegationChain(
+                publicKey: rootPublicKey,
+                delegations: [.init(delegation: delegation, signature: signature)]
+            ),
+            requestedAt: requestedAt,
+            maxTimeToLiveNanoseconds: ttl
+        ))
+        try ICIdentityValidation.validateSession(session, configuration: configuration)
+        return session
+    }
+
     public var formatVersion: Int { storage.formatVersion }
     public var principal: String { storage.principal }
     public var canisterId: String { storage.canisterId }
@@ -295,7 +346,7 @@ enum ICIdentityValidation {
         guard !ttlOverflow, !skewOverflow, earliestExpiration <= maximumExpiry else { throw ICClientError.invalidPayload }
     }
 
-    private static func delegationSignable(_ delegation: ICDelegationChain.SignedDelegation.Delegation) -> Data {
+    static func delegationSignable(_ delegation: ICDelegationChain.SignedDelegation.Delegation) -> Data {
         var fields: [(ICCBOR.Value, ICCBOR.Value)] = [
             (.text("pubkey"), .bytes(delegation.publicKey)),
             (.text("expiration"), .unsigned(delegation.expiration)),

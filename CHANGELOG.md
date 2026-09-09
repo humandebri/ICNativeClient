@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add `ICAuthSession.delegating(ed25519PrivateKey:configuration:options:)` to create expiring sessions from existing Ed25519 keys without retaining the root secret.
+
 All notable changes are documented here.
 
 ## [0.7.6] - 2026-09-08
