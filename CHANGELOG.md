@@ -1,10 +1,16 @@
 # Changelog
 
-## Unreleased
+All notable changes are documented here.
+
+## [0.7.7] - 2026-09-09
+
+### Added
 
 - Add `ICAuthSession.delegating(ed25519PrivateKey:configuration:options:)` to create expiring sessions from existing Ed25519 keys without retaining the root secret.
 
-All notable changes are documented here.
+### Compatibility
+
+- This release adds a public authentication API without changing existing session storage or wire formats. The bundled generator remains version 0.1.3.
 
 ## [0.7.6] - 2026-09-08
 
