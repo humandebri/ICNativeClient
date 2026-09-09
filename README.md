@@ -265,6 +265,25 @@ The callback origin must publish its exact callback declaration and Apple associ
 
 See [iOS Internet Identity authentication](docs/ios-internet-identity.md) for callback endpoints, AASA examples, deployment order, and device constraints.
 
+## Sessions from an existing Ed25519 key
+
+Applications that already own an Ed25519 identity can create a delegated session without an Internet Identity browser flow:
+
+```swift
+let identity = try ICAuthSession.delegating(
+    ed25519PrivateKey: rootPrivateKeyData, // 32-byte Ed25519 seed
+    configuration: configuration,
+    options: .default
+)
+try store.save(identity)
+```
+
+The root public key determines the principal. Each call creates a fresh random session key and a signed delegation; the root private key is not retained in `ICAuthSession` or its Keychain record. Applications remain responsible for obtaining and protecting their root key. Password and seed-phrase derivation are application concerns and are not performed by this API.
+
+The lifetime comes from `options.maxTimeToLiveNanoseconds`, or otherwise from `configuration.delegationTTLNanoseconds`, with the existing 30-day maximum. Targets are unrestricted by default. Explicit targets must include the configured canister and every other canister the session needs. The generated session passes the same signature, expiry, and scope validation as existing sessions. After expiration the application must supply the root key again; this API does not retain it for renewal.
+
+`internetIdentityURL` and `derivationOrigin` remain configuration bindings in the existing storage format; this operation does not contact those URLs and they do not affect the root-key principal. Existing sessions require no storage migration.
+
 ## Session storage
 
 `ICAuthSession` is not `Codable` and exposes no private-key accessor. `ICIdentityStore` keeps the secret in an internal storage DTO and Keychain item protected with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.

@@ -14,6 +14,81 @@ final class ICNativeClientTests: XCTestCase {
         super.tearDown()
     }
 
+    func testEd25519DelegatingCreatesFreshSessionsWithoutRetainingRootKey() throws {
+        let config = try configuration(root: BLSTKey(seed: 1).derPublicKey)
+        let rootKey = Curve25519.Signing.PrivateKey()
+        let first = try ICAuthSession.delegating(ed25519PrivateKey: rootKey.rawRepresentation, configuration: config)
+        let second = try ICAuthSession.delegating(ed25519PrivateKey: rootKey.rawRepresentation, configuration: config)
+        let rootDER = ICRC167Codec.derPublicKey(from: rootKey.publicKey.rawRepresentation)
+        XCTAssertEqual(first.principal, ICPrincipal.text(from: ICPrincipal.selfAuthenticatingPublicKey(rootDER)))
+        XCTAssertEqual(first.principal, second.principal)
+        XCTAssertNotEqual(first.sessionPublicKey, second.sessionPublicKey)
+        XCTAssertNotEqual(first.storage.sessionPrivateKey, rootKey.rawRepresentation)
+        XCTAssertEqual(first.maxTimeToLiveNanoseconds, config.delegationTTLNanoseconds)
+        XCTAssertNil(first.delegation.delegations[0].delegation.targets)
+        XCTAssertNoThrow(try ICIdentityValidation.validateSession(first, configuration: config))
+        let signed = first.delegation.delegations[0]
+        let fields: [(ICCBOR.Value, ICCBOR.Value)] = [
+            (.text("pubkey"), .bytes(first.sessionPublicKey)),
+            (.text("expiration"), .unsigned(signed.delegation.expiration)),
+        ]
+        let payload = Data([0x1a]) + Data("ic-request-auth-delegation".utf8) + ICRequestID.hash(of: .map(fields))
+        XCTAssertTrue(rootKey.publicKey.isValidSignature(signed.signature, for: payload))
+        let keychain = MockKeychain(data: nil)
+        let store = ICIdentityStore(configuration: config, service: "test", account: "session", keychain: keychain)
+        try store.save(first)
+        XCTAssertEqual(try store.load(), first)
+        let stored = try JSONDecoder().decode(ICStoredAuthSession.self, from: XCTUnwrap(keychain.data))
+        XCTAssertEqual(stored.sessionPrivateKey, first.storage.sessionPrivateKey)
+        XCTAssertNotEqual(stored.sessionPrivateKey, rootKey.rawRepresentation)
+        try store.clear()
+        XCTAssertNil(try store.load())
+    }
+
+    func testEd25519DelegatingEnforcesTargetsAndLifetime() throws {
+        let config = try configuration(root: BLSTKey(seed: 1).derPublicKey)
+        let key = Curve25519.Signing.PrivateKey().rawRepresentation
+        let ttl: UInt64 = 60_000_000_000
+        let options = try ICAuthenticationOptions(maxTimeToLiveNanoseconds: ttl, targets: [canisterText])
+        let session = try ICAuthSession.delegating(ed25519PrivateKey: key, configuration: config, options: options)
+        XCTAssertEqual(session.maxTimeToLiveNanoseconds, ttl)
+        XCTAssertEqual(session.delegation.delegations[0].delegation.targets, [ICPrincipal.parse(canisterText)!])
+        XCTAssertNoThrow(try ICIdentityValidation.validateSession(session, configuration: config, permission: .call))
+        XCTAssertThrowsError(try ICIdentityValidation.validateSession(session, configuration: config, requestCanisterId: "aaaaa-aa"))
+        XCTAssertThrowsError(try ICIdentityValidation.validateSession(session, configuration: config, now: session.requestedAt.addingTimeInterval(61)))
+        XCTAssertThrowsError(try ICAuthSession.delegating(
+            ed25519PrivateKey: key, configuration: config,
+            options: ICAuthenticationOptions(targets: ["aaaaa-aa"])
+        ))
+        XCTAssertThrowsError(try ICAuthenticationOptions(maxTimeToLiveNanoseconds: 0))
+        XCTAssertThrowsError(try ICAuthenticationOptions(maxTimeToLiveNanoseconds: ICClientConfiguration.maximumDelegationTTLNanoseconds + 1))
+        let maximum = try ICAuthSession.delegating(
+            ed25519PrivateKey: key, configuration: config,
+            options: ICAuthenticationOptions(maxTimeToLiveNanoseconds: ICClientConfiguration.maximumDelegationTTLNanoseconds)
+        )
+        XCTAssertNoThrow(try ICIdentityValidation.validateSession(maximum, configuration: config))
+    }
+
+    func testEd25519DelegatingRejectsInvalidKeysAndTamperedStorage() throws {
+        let config = try configuration(root: BLSTKey(seed: 1).derPublicKey)
+        for count in [0, 31, 33, 64] {
+            XCTAssertThrowsError(try ICAuthSession.delegating(ed25519PrivateKey: Data(repeating: 1, count: count), configuration: config))
+        }
+        let session = try ICAuthSession.delegating(ed25519PrivateKey: Curve25519.Signing.PrivateKey().rawRepresentation, configuration: config)
+        let signed = session.delegation.delegations[0]
+        let broken = ICAuthSession(storage: ICStoredAuthSession(
+            formatVersion: session.formatVersion, principal: session.principal,
+            canisterId: session.canisterId, internetIdentityURL: session.internetIdentityURL,
+            derivationOrigin: session.derivationOrigin, sessionPublicKey: session.sessionPublicKey,
+            sessionPrivateKey: session.storage.sessionPrivateKey,
+            delegation: ICDelegationChain(publicKey: session.delegation.publicKey, delegations: [
+                .init(delegation: signed.delegation, signature: Data(repeating: 0, count: 64)),
+            ]),
+            requestedAt: session.requestedAt, maxTimeToLiveNanoseconds: session.maxTimeToLiveNanoseconds
+        ))
+        XCTAssertThrowsError(try ICIdentityValidation.validateSession(broken, configuration: config))
+    }
+
     func testAuthorizationTimedOutDescriptionIsRetryable() {
         XCTAssertEqual(
             ICClientError.authorizationTimedOut.errorDescription,
