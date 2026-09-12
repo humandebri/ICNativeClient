@@ -172,7 +172,6 @@ public final class ICClient: @unchecked Sendable {
                 requestID: requestID,
                 method: method,
                 effectiveText: effectiveText,
-                effective: effective,
                 identity: identity
             )
         }
@@ -196,9 +195,9 @@ public final class ICClient: @unchecked Sendable {
                 effectiveCanisterID: effective,
                 trustRoot: configuration.trustRoot
             )
-            return try await resolve(status: ICCertificateVerifier.status(in: certificate, requestID: requestID), pollIfPending: true, requestID: requestID, effectiveText: effectiveText, identity: identity)
+            return try await resolve(status: ICCertificateVerifier.status(in: certificate, requestID: requestID), requestID: requestID, effectiveText: effectiveText, identity: identity)
         case "non_replicated_rejection":
-            throw ICClientError.rejected(try parseReject(fields, certified: false, context: "v4 rejection"))
+            throw ICClientError.rejected(try parseReject(fields, context: "v4 rejection"))
         default:
             throw ICClientError.invalidResponse("unsupported v4 call status \(status)")
         }
@@ -467,7 +466,6 @@ public final class ICClient: @unchecked Sendable {
         requestID: Data,
         method: String,
         effectiveText: String,
-        effective: Data,
         identity: ICAuthSession
     ) async throws -> Data {
         let (data, response) = try await postCBOR(
@@ -480,15 +478,13 @@ public final class ICClient: @unchecked Sendable {
         }
         if response.statusCode == 200 {
             let fields = try ICCBOR.requiredMap(ICCBOR.decodeStrict(data), context: "v2 call rejection")
-            throw ICClientError.rejected(try parseReject(fields, certified: false, context: "v2 rejection"))
+            throw ICClientError.rejected(try parseReject(fields, context: "v2 rejection"))
         }
-        _ = effective
         return try await poll(requestId: requestID, canisterId: effectiveText, identity: identity)
     }
 
     private func resolve(
         status: ICCertificateStatus,
-        pollIfPending: Bool,
         requestID: Data,
         effectiveText: String,
         identity: ICAuthSession
@@ -498,7 +494,6 @@ public final class ICClient: @unchecked Sendable {
         case .rejected(let reject): throw ICClientError.rejected(reject)
         case .done: throw ICClientError.requestDoneWithoutReply
         case .absent, .pending:
-            guard pollIfPending else { throw ICClientError.emptyResponse }
             return try await poll(requestId: requestID, canisterId: effectiveText, identity: identity)
         }
     }
@@ -513,7 +508,6 @@ public final class ICClient: @unchecked Sendable {
 
     private func parseReject(
         _ fields: [(ICCBOR.Value, ICCBOR.Value)],
-        certified: Bool,
         context: String
     ) throws -> ICReject {
         guard case .unsigned(let code) = try ICCBOR.requiredValue(fields, key: "reject_code", context: context),
@@ -525,7 +519,7 @@ public final class ICClient: @unchecked Sendable {
             guard case .text(let text) = value else { throw ICClientError.invalidResponse("\(context).error_code") }
             errorCode = text
         } else { errorCode = nil }
-        return ICReject(code: code, message: message, errorCode: errorCode, isCertified: certified)
+        return ICReject(code: code, message: message, errorCode: errorCode, isCertified: false)
     }
 
     private func postCBOR(_ body: Data, to url: URL, operation: String) async throws -> (Data, HTTPURLResponse) {

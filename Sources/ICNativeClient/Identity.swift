@@ -337,7 +337,7 @@ enum ICIdentityValidation {
             }
             if delegation.permissions == .queries, permission == .call { throw ICClientError.invalidIdentity("Delegation does not permit update calls.") }
             let payload = delegationSignable(delegation)
-            try verify(signature: signed.signature, payload: payload, signerDERKey: signerKey, trustRoot: trustRoot, now: now)
+            try verify(signature: signed.signature, payload: payload, signerDERKey: signerKey, trustRoot: trustRoot)
             signerKey = delegation.publicKey
         }
 
@@ -360,8 +360,7 @@ enum ICIdentityValidation {
         signature: Data,
         payload: Data,
         signerDERKey: Data,
-        trustRoot: ICTrustRoot,
-        now: Date
+        trustRoot: ICTrustRoot
     ) throws {
         let spki = try ICDERSubjectPublicKeyInfo(data: signerDERKey)
         switch spki.algorithmOID {
@@ -392,8 +391,7 @@ enum ICIdentityValidation {
                 signatureData: signature,
                 signingCanisterID: canister,
                 seed: Data(seed),
-                trustRoot: trustRoot,
-                now: now
+                trustRoot: trustRoot
             )
         default:
             throw ICClientError.invalidIdentity("Unsupported delegation signing algorithm.")

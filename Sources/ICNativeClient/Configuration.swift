@@ -164,7 +164,7 @@ public struct ICClientConfiguration: Equatable, Sendable {
               let resolvedInternetIdentityURL = internetIdentityURL ?? URL(string: "https://id.ai/authorize") else {
             throw ICClientError.invalidConfiguration("Default URLs could not be constructed.")
         }
-        try Self.validateHTTPSURL(resolvedAPIBaseURL, name: "IC API base URL", allowsQuery: false, requiredPath: nil)
+        try Self.validateAPIBaseURL(resolvedAPIBaseURL)
         try ICRC167Codec.validateInternetIdentityURL(resolvedInternetIdentityURL)
         try Self.validateOrigin(derivationOrigin)
         guard delegationTTLNanoseconds > 0,
@@ -213,21 +213,15 @@ public struct ICClientConfiguration: Equatable, Sendable {
         }
     }
 
-    static func validateHTTPSURL(
-        _ url: URL,
-        name: String,
-        allowsQuery: Bool,
-        requiredPath: String?
-    ) throws {
+    private static func validateAPIBaseURL(_ url: URL) throws {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.scheme?.lowercased() == "https",
               components.host?.isEmpty == false,
               components.user == nil,
               components.password == nil,
               components.percentEncodedFragment == nil,
-              allowsQuery || components.percentEncodedQuery == nil,
-              requiredPath == nil || components.percentEncodedPath == requiredPath else {
-            throw ICClientError.invalidConfiguration("\(name) must be an HTTPS URL without credentials or a fragment.")
+              components.percentEncodedQuery == nil else {
+            throw ICClientError.invalidConfiguration("IC API base URL must be an HTTPS URL without credentials or a fragment.")
         }
     }
 

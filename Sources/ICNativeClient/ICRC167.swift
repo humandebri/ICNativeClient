@@ -393,14 +393,6 @@ enum ICRC167Codec {
         return number
     }
 
-    private static func nanosecondsSinceEpoch(_ date: Date) throws -> UInt64 {
-        let seconds = date.timeIntervalSince1970
-        guard seconds >= 0, seconds <= Double(UInt64.max) / 1_000_000_000 else {
-            throw ICClientError.invalidPayload
-        }
-        return UInt64(seconds * 1_000_000_000)
-    }
-
     private static func randomToken(byteCount: Int) throws -> String {
         var bytes = [UInt8](repeating: 0, count: byteCount)
         guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {

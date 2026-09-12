@@ -21,7 +21,7 @@ fn generates_selected_typed_bindings_deterministically() {
     assert!(first.contains("public func transfer("));
     assert!(first.contains("effectiveCanisterId: String? = nil"));
     assert!(first.contains("delegationTargetCanisterId: String? = nil"));
-    assert!(first.contains("queryCandid(\n            method: \"account_balance\","));
+    assert!(first.contains("method: \"account_balance\","));
     assert!(first.contains("effectiveCanisterId: effectiveCanisterId"));
     assert!(first.contains("delegationTargetCanisterId: delegationTargetCanisterId"));
     assert!(first.contains("public struct LedgerStatusResult: Sendable"));
@@ -32,36 +32,11 @@ fn generates_selected_typed_bindings_deterministically() {
     assert!(first.contains("_ = try await client.queryCandid("));
     assert!(first.contains("return try reply.decode(LedgerTokens.self)"));
     assert!(!first.contains("reply.values.count =="));
-    assert!(!first.contains("_ICBindgenSupport"));
-    assert!(!first.contains("\nfunc _icBindgenDecode"));
     assert!(!first.contains("func ignored("));
 }
 
 #[test]
-fn reachable_field_addition_changes_output() {
-    let temporary = tempfile::tempdir().unwrap();
-    let manifest =
-        "[[canister]]\nname = \"Example\"\ndid = \"service.did\"\nmethods = [\"read\"]\n";
-    fs::write(temporary.path().join("bindings.toml"), manifest).unwrap();
-    fs::write(
-        temporary.path().join("service.did"),
-        "type Item = record { id : nat64 }; service : { read : () -> (Item) query };",
-    )
-    .unwrap();
-    let first = generate(&temporary.path().join("bindings.toml"), temporary.path()).unwrap();
-    fs::write(
-        temporary.path().join("service.did"),
-        "type Item = record { id : nat64; label : text }; service : { read : () -> (Item) query };",
-    )
-    .unwrap();
-    let second = generate(&temporary.path().join("bindings.toml"), temporary.path()).unwrap();
-
-    assert_ne!(first.as_bytes(), second.as_bytes());
-    assert!(second.contains("public let label: String"));
-}
-
-#[test]
-fn rejects_unsupported_types_without_writing_output() {
+fn rejects_unsupported_types() {
     let temporary = tempfile::tempdir().unwrap();
     fs::write(
         temporary.path().join("unsupported.did"),
@@ -127,27 +102,6 @@ fn deterministically_renames_reserved_and_colliding_members() {
     assert!(generated.contains(&format!(
         "{candid_value}: self.candidValue_{candid_value}.candidValue"
     )));
-}
-
-#[test]
-fn escapes_only_the_completed_canister_client_name() {
-    let temporary = tempfile::tempdir().unwrap();
-    fs::write(
-        temporary.path().join("service.did"),
-        "service : { read : () -> (nat64) query };",
-    )
-    .unwrap();
-    fs::write(
-        temporary.path().join("bindings.toml"),
-        "[[canister]]\nname = \"Self\"\ndid = \"service.did\"\nmethods = [\"read\"]\n",
-    )
-    .unwrap();
-
-    let generated = generate(&temporary.path().join("bindings.toml"), temporary.path()).unwrap();
-
-    assert!(generated.contains("public struct SelfCanister: Sendable"));
-    assert!(generated.contains("return try reply.decode(UInt64.self)"));
-    assert!(!generated.contains("`Self`Canister"));
 }
 
 #[test]

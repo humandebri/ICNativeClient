@@ -286,8 +286,7 @@ enum ICCertificateVerifier {
         signatureData: Data,
         signingCanisterID: Data,
         seed: Data,
-        trustRoot: ICTrustRoot,
-        now: Date
+        trustRoot: ICTrustRoot
     ) throws {
         let fields = try ICCBOR.requiredMap(
             ICCBOR.decodeStrict(signatureData),
