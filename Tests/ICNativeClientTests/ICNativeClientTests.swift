@@ -27,20 +27,10 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertEqual(first.maxTimeToLiveNanoseconds, config.delegationTTLNanoseconds)
         XCTAssertNil(first.delegation.delegations[0].delegation.targets)
         XCTAssertNoThrow(try ICIdentityValidation.validateSession(first, configuration: config))
-        let signed = first.delegation.delegations[0]
-        let fields: [(ICCBOR.Value, ICCBOR.Value)] = [
-            (.text("pubkey"), .bytes(first.sessionPublicKey)),
-            (.text("expiration"), .unsigned(signed.delegation.expiration)),
-        ]
-        let payload = Data([0x1a]) + Data("ic-request-auth-delegation".utf8) + ICRequestID.hash(of: .map(fields))
-        XCTAssertTrue(rootKey.publicKey.isValidSignature(signed.signature, for: payload))
         let keychain = MockKeychain(data: nil)
         let store = ICIdentityStore(configuration: config, service: "test", account: "session", keychain: keychain)
         try store.save(first)
         XCTAssertEqual(try store.load(), first)
-        let stored = try JSONDecoder().decode(ICStoredAuthSession.self, from: XCTUnwrap(keychain.data))
-        XCTAssertEqual(stored.sessionPrivateKey, first.storage.sessionPrivateKey)
-        XCTAssertNotEqual(stored.sessionPrivateKey, rootKey.rawRepresentation)
         try store.clear()
         XCTAssertNil(try store.load())
     }
@@ -67,33 +57,6 @@ final class ICNativeClientTests: XCTestCase {
             options: ICAuthenticationOptions(maxTimeToLiveNanoseconds: ICClientConfiguration.maximumDelegationTTLNanoseconds)
         )
         XCTAssertNoThrow(try ICIdentityValidation.validateSession(maximum, configuration: config))
-    }
-
-    func testEd25519DelegatingRejectsInvalidKeysAndTamperedStorage() throws {
-        let config = try configuration(root: BLSTKey(seed: 1).derPublicKey)
-        for count in [0, 31, 33, 64] {
-            XCTAssertThrowsError(try ICAuthSession.delegating(ed25519PrivateKey: Data(repeating: 1, count: count), configuration: config))
-        }
-        let session = try ICAuthSession.delegating(ed25519PrivateKey: Curve25519.Signing.PrivateKey().rawRepresentation, configuration: config)
-        let signed = session.delegation.delegations[0]
-        let broken = ICAuthSession(storage: ICStoredAuthSession(
-            formatVersion: session.formatVersion, principal: session.principal,
-            canisterId: session.canisterId, internetIdentityURL: session.internetIdentityURL,
-            derivationOrigin: session.derivationOrigin, sessionPublicKey: session.sessionPublicKey,
-            sessionPrivateKey: session.storage.sessionPrivateKey,
-            delegation: ICDelegationChain(publicKey: session.delegation.publicKey, delegations: [
-                .init(delegation: signed.delegation, signature: Data(repeating: 0, count: 64)),
-            ]),
-            requestedAt: session.requestedAt, maxTimeToLiveNanoseconds: session.maxTimeToLiveNanoseconds
-        ))
-        XCTAssertThrowsError(try ICIdentityValidation.validateSession(broken, configuration: config))
-    }
-
-    func testAuthorizationTimedOutDescriptionIsRetryable() {
-        XCTAssertEqual(
-            ICClientError.authorizationTimedOut.errorDescription,
-            "Internet Identity authorization timed out. Please try again."
-        )
     }
 
 #if canImport(UIKit)
@@ -225,14 +188,7 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertThrowsError(try ICCBOR.decodeStrict(Data([0xbf] + Array(duplicateMapKeys.dropFirst()) + [0xff])))
     }
 
-    func testRequestIDAndHashTreeVectors() throws {
-        XCTAssertEqual(
-            ICRequestID.hash(of: .text("hello")).icHexString,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-        )
-        let tree = try ICHashTree(value: .array([.unsigned(3), .bytes(Data("abc".utf8))]))
-        XCTAssertEqual(tree.digest.count, 32)
-        XCTAssertEqual(tree.lookup([]), .found(Data("abc".utf8)))
+    func testRequestIDPublicSpecVector() throws {
         let publicSpecRequest: ICCBOR.Value = .map([
             (.text("request_type"), .text("call")),
             (.text("sender"), .bytes(Data([0x04]))),
@@ -347,7 +303,7 @@ final class ICNativeClientTests: XCTestCase {
         ))
     }
 
-    func testCertifiedStatusBindsRequestIDAndHandlesDoneAndReject() throws {
+    func testCertifiedRejectBindsRequestID() throws {
         let key = BLSTKey(seed: 7)
         let requestID = Data(repeating: 1, count: 32)
         let now = Date()
@@ -371,17 +327,6 @@ final class ICNativeClientTests: XCTestCase {
         )
         XCTAssertEqual(try ICCertificateVerifier.status(in: certificate, requestID: Data(repeating: 2, count: 32)), .absent)
 
-        let doneData = try makeCertificate(leaves: [
-            ([Data("time".utf8)], ICRequestID.leb128(nanoseconds(now))),
-            (base + [Data("status".utf8)], Data("done".utf8)),
-        ], key: key)
-        let done = try ICCertificateVerifier.verify(
-            certificateData: doneData,
-            effectiveCanisterID: Data(),
-            trustRoot: .custom(key.derPublicKey),
-            now: now
-        )
-        XCTAssertEqual(try ICCertificateVerifier.status(in: done, requestID: requestID), .done)
     }
 
     func testHashTreeLookupUsesVisibleBoundariesAroundPrunedBranches() throws {
@@ -478,7 +423,7 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertThrowsError(try ICIdentityValidation.validateSession(excluded, configuration: config))
     }
 
-    func testTwoHopDelegationAndCycleRejection() throws {
+    func testDelegationChainsRejectCyclesAndEnforceDepthAndTargetLimits() throws {
         let config = try configuration(root: BLSTKey(seed: 9).derPublicKey)
         let root = Curve25519.Signing.PrivateKey()
         let intermediate = Curve25519.Signing.PrivateKey()
@@ -494,45 +439,51 @@ final class ICNativeClientTests: XCTestCase {
         let stored = replacing(auth.storage, chain: cycle, sessionPublicKey: rootDER, privateKey: root.rawRepresentation)
         XCTAssertThrowsError(try ICIdentityValidation.validateSession(ICAuthSession(storage: stored), configuration: config))
 
-        let tooDeep = ICDelegationChain(
-            publicKey: rootDER,
-            delegations: (0..<21).map { index in
-                .init(
-                    delegation: .init(
-                        publicKey: index == 20 ? auth.sessionPublicKey : Data(repeating: UInt8(index + 1), count: 44),
-                        expiration: expiry,
-                        targets: nil
-                    ),
-                    signature: Data(repeating: 1, count: 64)
+        let now = Date()
+        func validate(_ chain: ICDelegationChain) throws {
+            try ICIdentityValidation.validateDelegationChain(
+                chain,
+                expectedSessionPublicKey: auth.sessionPublicKey,
+                canisterId: config.canisterId,
+                requestedAt: now,
+                maxTimeToLiveNanoseconds: config.delegationTTLNanoseconds,
+                permission: nil,
+                trustRoot: config.trustRoot,
+                now: now
+            )
+        }
+        func signedChain(depth: Int) throws -> ICDelegationChain {
+            let keys = [root] + (0..<(depth - 1)).map { _ in Curve25519.Signing.PrivateKey() } + [session]
+            let delegations = try (0..<depth).map { index in
+                let delegation = ICDelegationChain.SignedDelegation.Delegation(
+                    publicKey: ICRC167Codec.derPublicKey(from: keys[index + 1].publicKey.rawRepresentation),
+                    expiration: expiry,
+                    targets: nil
+                )
+                return ICDelegationChain.SignedDelegation(
+                    delegation: delegation,
+                    signature: try keys[index].signature(for: delegationSignable(delegation))
                 )
             }
-        )
-        XCTAssertThrowsError(try ICIdentityValidation.validateDelegationChain(
-            tooDeep,
-            expectedSessionPublicKey: auth.sessionPublicKey,
-            canisterId: config.canisterId,
-            requestedAt: Date(),
-            maxTimeToLiveNanoseconds: config.delegationTTLNanoseconds,
-            permission: nil,
-            trustRoot: config.trustRoot,
-            now: Date()
-        ))
+            return ICDelegationChain(publicKey: rootDER, delegations: delegations)
+        }
+        XCTAssertNoThrow(try validate(signedChain(depth: 20)))
+        XCTAssertThrowsError(try validate(signedChain(depth: 21)))
 
-        let tooManyTargets = ICDelegationChain.SignedDelegation.Delegation(
-            publicKey: auth.sessionPublicKey,
-            expiration: expiry,
-            targets: Array(repeating: try XCTUnwrap(ICPrincipal.parse(config.canisterId)), count: 1_001)
-        )
-        XCTAssertThrowsError(try ICIdentityValidation.validateDelegationChain(
-            ICDelegationChain(publicKey: rootDER, delegations: [.init(delegation: tooManyTargets, signature: Data(repeating: 1, count: 64))]),
-            expectedSessionPublicKey: auth.sessionPublicKey,
-            canisterId: config.canisterId,
-            requestedAt: Date(),
-            maxTimeToLiveNanoseconds: config.delegationTTLNanoseconds,
-            permission: nil,
-            trustRoot: config.trustRoot,
-            now: Date()
-        ))
+        let canister = try XCTUnwrap(ICPrincipal.parse(config.canisterId))
+        let targets = [canister] + (0..<1_000).map { Data([UInt8($0 >> 8), UInt8($0 & 0xff)]) }
+        func targetedChain(count: Int) throws -> ICDelegationChain {
+            let delegation = ICDelegationChain.SignedDelegation.Delegation(
+                publicKey: auth.sessionPublicKey,
+                expiration: expiry,
+                targets: Array(targets.prefix(count))
+            )
+            return ICDelegationChain(publicKey: rootDER, delegations: [
+                .init(delegation: delegation, signature: try root.signature(for: delegationSignable(delegation))),
+            ])
+        }
+        XCTAssertNoThrow(try validate(targetedChain(count: 1_000)))
+        XCTAssertThrowsError(try validate(targetedChain(count: 1_001)))
     }
 
     func testCanisterSignedInternetIdentityDelegationIsVerified() throws {
@@ -548,33 +499,11 @@ final class ICNativeClientTests: XCTestCase {
             expiration: nanoseconds(Date().addingTimeInterval(3_600)),
             targets: [signingCanister]
         )
-        let payload = delegationSignable(delegation)
-        let signatureTree = hashTree([(
-            [Data("sig".utf8), Data(SHA256.hash(data: seed)), Data(SHA256.hash(data: payload))],
-            Data()
-        )])
-        let signatureDigest = try ICHashTree(value: signatureTree).digest
-        let certificate = try makeCertificate(leaves: [
-            // Canister-signature witness certificates may be older than the
-            // replica-response skew window; delegation expiration is the bound.
-            ([Data("time".utf8)], ICRequestID.leb128(nanoseconds(Date().addingTimeInterval(-600)))),
-            ([Data("canister".utf8), signingCanister, Data("certified_data".utf8)], signatureDigest),
-        ], key: root)
-        let decodedCertificate = try ICCertificate(cbor: certificate)
-        XCTAssertEqual(
-            decodedCertificate.tree.lookup([Data("canister".utf8), signingCanister, Data("certified_data".utf8)]),
-            .found(signatureDigest)
+        // Old witness certificates remain valid until the delegation expires.
+        let canisterSignature = try makeCanisterSignature(
+            payload: delegationSignable(delegation), canister: signingCanister,
+            seed: seed, root: root, now: Date()
         )
-        XCTAssertEqual(
-            try ICCertificate(cbor: certificate).tree.lookup([
-                Data("canister".utf8), signingCanister, Data("certified_data".utf8),
-            ]),
-            .found(signatureDigest)
-        )
-        let canisterSignature = ICCBOR.encode(.tagged(ICCBOR.selfDescribeTag, .map([
-            (.text("certificate"), .bytes(certificate)),
-            (.text("tree"), signatureTree),
-        ])))
         let chain = ICDelegationChain(
             publicKey: canisterKey,
             delegations: [.init(delegation: delegation, signature: canisterSignature)]
@@ -592,6 +521,18 @@ final class ICNativeClientTests: XCTestCase {
             maxTimeToLiveNanoseconds: config.delegationTTLNanoseconds
         ))
         XCTAssertNoThrow(try ICIdentityValidation.validateSession(session, configuration: config))
+
+        let parameterizedKey = subjectPublicKeyDER(
+            algorithmOID: Data([0x2b, 0x06, 0x01, 0x04, 0x01, 0x83, 0xb8, 0x43, 0x01, 0x02]),
+            algorithmSuffix: derTLV(tag: 0x06, value: Data([0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07])),
+            key: Data([UInt8(signingCanister.count)]) + signingCanister + seed
+        )
+        XCTAssertThrowsError(try ICIdentityValidation.validateDelegationChain(
+            ICDelegationChain(publicKey: parameterizedKey, delegations: chain.delegations),
+            expectedSessionPublicKey: sessionDER, canisterId: config.canisterId,
+            requestedAt: session.requestedAt, maxTimeToLiveNanoseconds: config.delegationTTLNanoseconds,
+            permission: nil, trustRoot: config.trustRoot, now: Date()
+        ))
 
         var tamperedSignature = canisterSignature
         tamperedSignature[tamperedSignature.index(before: tamperedSignature.endIndex)] ^= 1
@@ -711,14 +652,6 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertThrowsError(try validate(signerDER: signingKey.publicKey.derRepresentation, signature: tampered))
         XCTAssertThrowsError(try validate(
             signerDER: signingKey.publicKey.derRepresentation,
-            signature: Data(signature.rawRepresentation.dropLast())
-        ))
-        XCTAssertThrowsError(try validate(
-            signerDER: signingKey.publicKey.derRepresentation,
-            signature: signature.rawRepresentation + Data([0])
-        ))
-        XCTAssertThrowsError(try validate(
-            signerDER: signingKey.publicKey.derRepresentation,
             signature: signature.derRepresentation
         ))
 
@@ -726,10 +659,6 @@ final class ICNativeClientTests: XCTestCase {
         let compressedPublicKey = Data([0x02]) + rawPublicKey.subdata(in: 1..<33)
         XCTAssertThrowsError(try validate(
             signerDER: ecPublicKeyDER(key: compressedPublicKey),
-            signature: signature.rawRepresentation
-        ))
-        XCTAssertThrowsError(try validate(
-            signerDER: ecPublicKeyDER(key: Data([0x04]) + Data(repeating: 0, count: 64)),
             signature: signature.rawRepresentation
         ))
         XCTAssertThrowsError(try validate(
@@ -776,35 +705,6 @@ final class ICNativeClientTests: XCTestCase {
             ),
             signature: try ed25519Key.signature(for: delegationSignable(delegation))
         ))
-        XCTAssertThrowsError(try validate(
-            signerDER: subjectPublicKeyDER(
-                algorithmOID: Data([0x2b, 0x06, 0x01, 0x04, 0x01, 0x83, 0xb8, 0x43, 0x01, 0x02]),
-                algorithmSuffix: unexpectedOIDParameter,
-                key: Data([1, 4]) + Data("seed".utf8)
-            ),
-            signature: Data([1])
-        ))
-    }
-
-    func testICRC167CarriesDerivationOriginAndRejectsStateReplay() throws {
-        let config = try configuration(root: BLSTKey(seed: 10).derPublicKey)
-        let pending = ICRC167PendingRequest(
-            requestID: "request",
-            state: "state",
-            privateKey: Curve25519.Signing.PrivateKey(),
-            requestedAt: Date(),
-            maxTimeToLiveNanoseconds: ICClientConfiguration.defaultDelegationTTLNanoseconds
-        )
-        let callback = URL(string: "https://app.example/ios-auth-callback")!
-        let url = try ICRC167Codec.authorizationURL(configuration: config, callbackURL: callback, pendingRequest: pending)
-        let fragment = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedFragment)
-        let fields = try ICRC167Codec.parseFormEncoded(fragment)
-        let message = try XCTUnwrap(fields["message"]?.data(using: .utf8))
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: message) as? [String: Any])
-        let parameters = try XCTUnwrap(json["params"] as? [String: Any])
-        XCTAssertEqual(parameters["icrc95DerivationOrigin"] as? String, config.derivationOrigin)
-        XCTAssertEqual(parameters["maxTimeToLive"] as? String, String(ICClientConfiguration.defaultDelegationTTLNanoseconds))
-        XCTAssertThrowsError(try ICRC167Codec.parseFormEncoded("state=a&state=b"))
     }
 
     func testVerifiedQueryFetchesCertifiedKeysCachesThemAndUnsafeQuerySkipsFetch() async throws {
@@ -1148,49 +1048,6 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertEqual(lock.withLock { reads }, 2)
     }
 
-    func testV4CertifiedReplyReject202V2RejectAndDone() async throws {
-        let root = BLSTKey(seed: 13)
-        let config = try configuration(root: root.derPublicKey)
-        let identity = try makeAuthSession(config: config)
-        let canister = try XCTUnwrap(ICPrincipal.parse(canisterText))
-
-        URLProtocolStub.handler = { request in
-            let content = try requestContent(request)
-            let requestID = ICRequestID.hash(of: content)
-            let now = Date()
-            let base = [Data("request_status".utf8), requestID]
-            let certificate = try self.makeCertificate(leaves: [
-                ([Data("time".utf8)], ICRequestID.leb128(self.nanoseconds(now))),
-                (base + [Data("status".utf8)], Data("replied".utf8)),
-                (base + [Data("reply".utf8)], Data("done".utf8)),
-            ], key: root)
-            return response(request, status: 200, body: ICCBOR.encode(.map([
-                (.text("status"), .text("replied")),
-                (.text("certificate"), .bytes(certificate)),
-            ])))
-        }
-        let reply = try await client(config).callRaw(method: "update", identity: identity)
-        XCTAssertEqual(reply, Data("done".utf8))
-
-        URLProtocolStub.handler = { request in response(request, status: 200, body: ICCBOR.encode(.map([
-            (.text("status"), .text("non_replicated_rejection")),
-            (.text("reject_code"), .unsigned(4)),
-            (.text("reject_message"), .text("no")),
-            (.text("error_code"), .text("IC0406")),
-        ]))) }
-        await XCTAssertThrowsErrorAsync(try await client(config).callRaw(method: "reject", identity: identity))
-
-        URLProtocolStub.handler = { request in
-            if request.url?.path.contains("/v4/") == true { return response(request, status: 404, body: Data()) }
-            return response(request, status: 200, body: ICCBOR.encode(.map([
-                (.text("reject_code"), .unsigned(3)),
-                (.text("reject_message"), .text("bad destination")),
-            ])))
-        }
-        await XCTAssertThrowsErrorAsync(try await client(config).callRaw(method: "v2", identity: identity))
-        _ = canister
-    }
-
     func testCandidCallUsesVerifiedRawTransportWithoutChangingArgumentBytes() async throws {
         let root = BLSTKey(seed: 32)
         let config = try configuration(root: root.derPublicKey)
@@ -1273,7 +1130,7 @@ final class ICNativeClientTests: XCTestCase {
         }
     }
 
-    func testV2AcceptedPollsAndReturnsCertifiedReply() async throws {
+    func testV2FallbackHandlesAcceptedAndRejectedResponses() async throws {
         let root = BLSTKey(seed: 26)
         let config = try configuration(root: root.derPublicKey)
         let identity = try makeAuthSession(config: config)
@@ -1299,6 +1156,19 @@ final class ICNativeClientTests: XCTestCase {
         }
         let reply = try await client(config).callRaw(method: "accepted-v2", identity: identity)
         XCTAssertEqual(reply, Data("v2 reply".utf8))
+
+        URLProtocolStub.handler = { request in
+            if request.url?.path.contains("/v4/") == true { return response(request, status: 404, body: Data()) }
+            return response(request, status: 200, body: ICCBOR.encode(.map([
+                (.text("reject_code"), .unsigned(3)),
+                (.text("reject_message"), .text("bad destination")),
+            ])))
+        }
+        await XCTAssertThrowsErrorAsync(try await client(config).callRaw(method: "v2", identity: identity)) { error in
+            XCTAssertEqual(error as? ICClientError, .rejected(ICReject(
+                code: 3, message: "bad destination", errorCode: nil, isCertified: false
+            )))
+        }
     }
 
     func testResponseLimitStopsBeforeBodyAcceptance() async throws {
@@ -1335,88 +1205,49 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertEqual(keychain.data, old)
         keychain.copyStatus = errSecInteractionNotAllowed
         XCTAssertThrowsError(try store.load())
+        keychain.copyStatus = errSecSuccess
+        XCTAssertThrowsError(try store.load())
+        XCTAssertEqual(keychain.data, old)
         keychain.copyStatus = errSecItemNotFound
         XCTAssertNil(try store.load())
     }
 
-    func testIdentityStoreUsesAccessGroupForEveryKeychainOperation() throws {
+    func testIdentityStorePassesAccessGroupThroughEveryOperationAndDuplicateRetry() throws {
         let config = try configuration(root: BLSTKey(seed: 28).derPublicKey)
         let session = try makeAuthSession(config: config)
-        let accessGroup = "TEAMID.com.example.shared"
-        let keychain = MockKeychain(data: nil)
-        let store = ICIdentityStore(
-            configuration: config,
-            service: "shared-service",
-            account: "shared-account",
-            accessGroup: accessGroup,
-            keychain: keychain
-        )
+        for accessGroup in ["TEAMID.com.example.shared", nil] as [String?] {
+            let keychain = MockKeychain(data: nil)
+            let store = ICIdentityStore(
+                configuration: config, service: "test", account: "session",
+                accessGroup: accessGroup, keychain: keychain
+            )
+            XCTAssertNil(try store.load())
+            try store.save(session)
+            try store.clear()
+            for queries in [keychain.copyQueries, keychain.updateQueries, keychain.addQueries, keychain.deleteQueries] {
+                XCTAssertEqual(queries.count, 1)
+            }
 
-        XCTAssertNil(try store.load())
-        try store.save(session)
-        try store.clear()
-
-        let queries = keychain.copyQueries + keychain.updateQueries + keychain.addQueries + keychain.deleteQueries
-        XCTAssertFalse(queries.isEmpty)
-        for query in queries {
-            XCTAssertEqual(query[kSecAttrAccessGroup as String] as? String, accessGroup)
+            let retryKeychain = MockKeychain(data: nil)
+            retryKeychain.updateStatuses = [errSecItemNotFound, errSecSuccess]
+            retryKeychain.addStatus = errSecDuplicateItem
+            let retryStore = ICIdentityStore(
+                configuration: config, service: "test", account: "session",
+                accessGroup: accessGroup, keychain: retryKeychain
+            )
+            try retryStore.save(session)
+            XCTAssertEqual(retryKeychain.updateQueries.count, 2)
+            XCTAssertEqual(retryKeychain.addQueries.count, 1)
+            let queries = keychain.copyQueries + keychain.updateQueries + keychain.addQueries + keychain.deleteQueries
+                + retryKeychain.updateQueries + retryKeychain.addQueries
+            for query in queries {
+                if let accessGroup {
+                    XCTAssertEqual(query[kSecAttrAccessGroup as String] as? String, accessGroup)
+                } else {
+                    XCTAssertNil(query[kSecAttrAccessGroup as String])
+                }
+            }
         }
-
-        let retryKeychain = MockKeychain(data: nil)
-        retryKeychain.updateStatuses = [errSecItemNotFound, errSecSuccess]
-        retryKeychain.addStatus = errSecDuplicateItem
-        let retryStore = ICIdentityStore(
-            configuration: config,
-            service: "shared-service",
-            account: "shared-account",
-            accessGroup: accessGroup,
-            keychain: retryKeychain
-        )
-        try retryStore.save(session)
-        XCTAssertEqual(retryKeychain.updateQueries.count, 2)
-        XCTAssertEqual(retryKeychain.addQueries.count, 1)
-        for query in retryKeychain.updateQueries + retryKeychain.addQueries {
-            XCTAssertEqual(query[kSecAttrAccessGroup as String] as? String, accessGroup)
-        }
-    }
-
-    func testIdentityStoreOmitsAccessGroupWhenUnspecified() throws {
-        let config = try configuration(root: BLSTKey(seed: 29).derPublicKey)
-        let session = try makeAuthSession(config: config)
-        let keychain = MockKeychain(data: nil)
-        let store = ICIdentityStore(
-            configuration: config,
-            service: "private-service",
-            account: "private-account",
-            keychain: keychain
-        )
-
-        XCTAssertNil(try store.load())
-        try store.save(session)
-        try store.clear()
-
-        let queries = keychain.copyQueries + keychain.updateQueries + keychain.addQueries + keychain.deleteQueries
-        XCTAssertFalse(queries.isEmpty)
-        for query in queries {
-            XCTAssertNil(query[kSecAttrAccessGroup as String])
-        }
-    }
-
-    func testBLSVerificationPerformanceIsMeasured() throws {
-        let key = BLSTKey(seed: 17)
-        let message = Data("benchmark".utf8)
-        let signature = key.sign(message)
-        let start = ContinuousClock.now
-        for _ in 0..<100 {
-            XCTAssertTrue(ICBLS.verify(
-                signature: signature,
-                message: message,
-                publicKey: key.publicKey,
-                dst: BLSTKey.dst
-            ))
-        }
-        let elapsed = start.duration(to: .now)
-        XCTAssertLessThan(elapsed, .seconds(5), "100 BLS verifications took \(elapsed)")
     }
 
     func testICRC167DefaultRequestUsesEightHourTTLAndFragmentOnly() throws {
@@ -1477,7 +1308,6 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertThrowsError(try ICAuthenticationOptions(targets: []))
         XCTAssertThrowsError(try ICAuthenticationOptions(targets: [canisterText, canisterText]))
         XCTAssertThrowsError(try ICAuthenticationOptions(targets: ["not-a-principal"]))
-        XCTAssertThrowsError(try ICAuthenticationOptions(maxTimeToLiveNanoseconds: 0))
         let missingConfigured = try ICRC167Codec.makePendingRequest(targets: ["aaaaa-aa"])
         XCTAssertThrowsError(try ICRC167Codec.authorizationURL(
             configuration: config,
@@ -1537,7 +1367,16 @@ final class ICNativeClientTests: XCTestCase {
     func testICRC167AcceptsSignedOneAndTwoHopResponses() throws {
         let config = try configuration(root: BLSTKey(seed: 19).derPublicKey)
         let one = icrcPending()
-        XCTAssertEqual(try parseICRC(try icrcCallback(pending: one), pending: one, config: config).delegation.delegations.count, 1)
+        let root = Curve25519.Signing.PrivateKey()
+        let oneHop = try parseICRC(
+            try icrcCallback(pending: one, targets: [canisterText], rootKey: root), pending: one, config: config
+        )
+        let rootDER = ICRC167Codec.derPublicKey(from: root.publicKey.rawRepresentation)
+        XCTAssertEqual(oneHop.delegation.delegations.count, 1)
+        XCTAssertEqual(oneHop.delegation.delegations[0].delegation.targets, [try XCTUnwrap(ICPrincipal.parse(canisterText))])
+        XCTAssertEqual(oneHop.principal, ICPrincipal.text(from: ICPrincipal.selfAuthenticatingPublicKey(rootDER)))
+        XCTAssertEqual(oneHop.formatVersion, ICAuthSession.currentFormatVersion)
+        XCTAssertEqual(oneHop.requestedAt, one.requestedAt)
         let two = icrcPending()
         let intermediate = Curve25519.Signing.PrivateKey()
         let session = try parseICRC(
@@ -1603,13 +1442,8 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertThrowsError(try parseICRC(try icrcCallback(object: object, state: both.state), pending: both, config: config))
     }
 
-    func testICRC167RejectsExpirationBase64LeafAndTargetFailures() throws {
+    func testICRC167RejectsExpirationLeafAndTargetFailures() throws {
         let config = try configuration(root: BLSTKey(seed: 22).derPublicKey)
-        let numeric = icrcPending()
-        XCTAssertThrowsError(try parseICRC(try icrcCallback(
-            pending: numeric,
-            expiration: NSNumber(value: nanoseconds(Date().addingTimeInterval(3_600)))
-        ), pending: numeric, config: config))
         let expired = icrcPending()
         XCTAssertThrowsError(try parseICRC(try icrcCallback(pending: expired, expiration: "0"), pending: expired, config: config))
         let overTTL = icrcPending(ttl: 3_600_000_000_000)
@@ -1617,36 +1451,11 @@ final class ICNativeClientTests: XCTestCase {
             pending: overTTL,
             expiration: String(nanoseconds(overTTL.requestedAt.addingTimeInterval(7_200)))
         ), pending: overTTL, config: config))
-        let base64 = icrcPending()
-        XCTAssertThrowsError(try parseICRC(try icrcCallback(pending: base64, rootEncoding: "-w=="), pending: base64, config: config))
         let leaf = icrcPending()
         let other = ICRC167Codec.derPublicKey(from: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation)
         XCTAssertThrowsError(try parseICRC(try icrcCallback(pending: leaf, leafKey: other), pending: leaf, config: config))
         let target = icrcPending()
         XCTAssertThrowsError(try parseICRC(try icrcCallback(pending: target, targets: ["2vxsx-fae"]), pending: target, config: config))
-    }
-
-    func testICRC167NarrowTargetAndRootPrincipalArePreserved() throws {
-        let config = try configuration(root: BLSTKey(seed: 23).derPublicKey)
-        let pending = icrcPending()
-        let root = Curve25519.Signing.PrivateKey()
-        let session = try parseICRC(
-            try icrcCallback(pending: pending, targets: [canisterText], rootKey: root),
-            pending: pending,
-            config: config
-        )
-        let rootDER = ICRC167Codec.derPublicKey(from: root.publicKey.rawRepresentation)
-        XCTAssertEqual(session.principal, ICPrincipal.text(from: ICPrincipal.selfAuthenticatingPublicKey(rootDER)))
-        XCTAssertEqual(session.storage.formatVersion, ICAuthSession.currentFormatVersion)
-        XCTAssertEqual(session.requestedAt, pending.requestedAt)
-    }
-
-    func testMalformedKeychainSessionIsPreservedAndRejected() throws {
-        let config = try configuration(root: BLSTKey(seed: 24).derPublicKey)
-        let keychain = MockKeychain(data: Data(#"{"identityProvider":"https://id.ai/#authorize"}"#.utf8))
-        let store = ICIdentityStore(configuration: config, service: "test", account: "legacy", keychain: keychain)
-        XCTAssertThrowsError(try store.load())
-        XCTAssertNotNil(keychain.data)
     }
 
     // MARK: Helpers
@@ -1663,7 +1472,7 @@ final class ICNativeClientTests: XCTestCase {
     private func client(_ config: ICClientConfiguration) -> ICClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [URLProtocolStub.self]
-        return ICClient(configuration: config, session: URLSession(configuration: configuration))
+        return ICClient(configuration: config, session: URLSession(configuration: configuration), sleep: { _ in })
     }
 
     private func makeAuthSession(

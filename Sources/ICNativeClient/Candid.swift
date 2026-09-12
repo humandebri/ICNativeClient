@@ -537,7 +537,11 @@ extension Array: CandidConvertible where Element: CandidConvertible {
 // Shared by every stage of one decode, including normalization and validation.
 final class CandidDecodingBudget {
     static let maximumWork = 1_000_000
-    private(set) var remaining = maximumWork
+    private(set) var remaining: Int
+
+    init(maximumWork: Int = CandidDecodingBudget.maximumWork) {
+        remaining = maximumWork
+    }
 
     func consume(_ amount: Int = 1) throws {
         guard amount >= 0, amount <= remaining else {

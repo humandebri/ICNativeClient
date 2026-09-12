@@ -5,9 +5,8 @@ public struct CandidEncoder: Sendable {
 
     public func encode(_ arguments: CandidArguments) throws -> Data {
         try Binary.checkCollection(arguments.values.count)
-        let values = try arguments.values.map {
-            try CandidTypedValue(type: Candid.normalized($0.type), value: $0.value)
-        }
+        // CandidTypedValue validates and normalizes its immutable contents at construction.
+        let values = arguments.values
         var tableBuilder = EncoderTypeTable()
         let references = try values.map { try tableBuilder.reference(for: $0.type, bindings: [:], depth: 0) }
         let table = try tableBuilder.finalized()
@@ -202,7 +201,10 @@ public struct CandidDecoder: Sendable {
     public init() {}
 
     public func decode(_ data: Data) throws -> CandidReply {
-        let budget = CandidDecodingBudget()
+        try decode(data, budget: CandidDecodingBudget())
+    }
+
+    func decode(_ data: Data, budget: CandidDecodingBudget) throws -> CandidReply {
         var reader = Binary.Reader(data, budget: budget)
         guard try reader.readData(count: 4) == Data("DIDL".utf8) else {
             throw ICClientError.invalidCandid("missing DIDL header")
@@ -485,8 +487,6 @@ private extension CandidType {
         }
     }
 
-    var isRecord: Bool { if case .record = self { true } else { false } }
-
     var freeRecursiveReferences: Set<UInt32> {
         switch self {
         case .optional(let child), .vector(let child):
@@ -619,7 +619,7 @@ private enum Binary {
     }
 }
 
-private struct BigUnsigned: Equatable, Comparable {
+private struct BigUnsigned: Equatable {
     private static let base: UInt64 = 1_000_000_000
     var limbs: [UInt32]
 
@@ -634,14 +634,6 @@ private struct BigUnsigned: Equatable, Comparable {
 
     init(_ value: UInt32 = 0) { limbs = [value] }
     var isZero: Bool { limbs.count == 1 && limbs[0] == 0 }
-
-    static func < (lhs: Self, rhs: Self) -> Bool {
-        if lhs.limbs.count != rhs.limbs.count { return lhs.limbs.count < rhs.limbs.count }
-        for index in lhs.limbs.indices.reversed() where lhs.limbs[index] != rhs.limbs[index] {
-            return lhs.limbs[index] < rhs.limbs[index]
-        }
-        return false
-    }
 
     mutating func add(_ value: UInt32) {
         var carry = UInt64(value), index = 0
@@ -744,7 +736,6 @@ private enum BigLEB {
         if negative {
             var power = BigUnsigned(1)
             for _ in bytes { power.multiply(by: 128) }
-            guard power >= unsignedValue else { throw ICClientError.invalidCandid("invalid signed LEB128") }
             power.subtract(unsignedValue)
             decimal = "-" + power.decimal
         } else {

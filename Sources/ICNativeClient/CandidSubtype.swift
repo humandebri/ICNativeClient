@@ -142,9 +142,15 @@ enum CandidSubtype {
         case let (.record(actualFields), .record(expectedFields)):
             guard case .record(_, let values) = value else { return nil }
             var projected: [UInt32: CandidValue] = [:]
+            // Both field lists are normalized into ascending, unique IDs before projection.
+            var actualIndex = 0
             for expectedField in expectedFields {
-                if let actualField = actualFields.first(where: { $0.id == expectedField.id }),
+                while actualIndex < actualFields.count, actualFields[actualIndex].id < expectedField.id {
+                    actualIndex += 1
+                }
+                if actualIndex < actualFields.count, actualFields[actualIndex].id == expectedField.id,
                    let actualValue = values[expectedField.id] {
+                    let actualField = actualFields[actualIndex]
                     guard let projectedValue = try project(
                         actualValue,
                         actual: actualField.type,

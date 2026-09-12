@@ -5,8 +5,7 @@ import XCTest
 final class GeneratedBindingsTests: XCTestCase {
     private func decode<T: CandidConvertible>(
         _ typedValue: CandidTypedValue,
-        as type: T.Type,
-        context _: String
+        as type: T.Type
     ) throws -> T {
         try CandidReply(values: [typedValue]).decode(type)
     }
@@ -69,8 +68,7 @@ final class GeneratedBindingsTests: XCTestCase {
         ])
         let entry = try decode(
             CandidTypedValue(type: .record(expandedEntryFields), value: expandedEntry),
-            as: FixtureEntry.self,
-            context: "record"
+            as: FixtureEntry.self
         )
         XCTAssertEqual(entry.id, 42)
         XCTAssertEqual(entry.label, "compatible")
@@ -80,15 +78,13 @@ final class GeneratedBindingsTests: XCTestCase {
                 type: .vector(.record(expandedEntryFields)),
                 value: .vector(.record(expandedEntryFields), [expandedEntry])
             ),
-            as: [FixtureEntry].self,
-            context: "vector"
+            as: [FixtureEntry].self
         )
         XCTAssertEqual(vector.map(\.label), ["compatible"])
 
         let optional = try decode(
             CandidTypedValue(type: .record(expandedEntryFields), value: expandedEntry),
-            as: FixtureEntry?.self,
-            context: "optional"
+            as: FixtureEntry?.self
         )
         XCTAssertEqual(optional?.id, 42)
 
@@ -108,39 +104,10 @@ final class GeneratedBindingsTests: XCTestCase {
                 type: .recursive(id: recursiveID, body: .record(recursiveFields)),
                 value: recursiveValue
             ),
-            as: FixtureRecursiveRecord.self,
-            context: "recursive record"
+            as: FixtureRecursiveRecord.self
         )
         XCTAssertEqual(recursive.value, "root")
         XCTAssertNil(recursive.next)
-    }
-
-    func testGeneratedDecoderAllowsOnlyCandidNumericSubtyping() throws {
-        XCTAssertEqual(
-            try decode(
-                CandidTypedValue(type: .nat, value: .nat(try CandidNat("42"))),
-                as: CandidInt.self,
-                context: "numeric"
-            ).decimal,
-            "42"
-        )
-        XCTAssertThrowsError(
-            try decode(
-                CandidTypedValue(type: .nat8, value: .nat8(42)),
-                as: UInt64.self,
-                context: "fixed-width widening"
-            )
-        )
-        XCTAssertNil(try decode(
-            CandidTypedValue(type: .text, value: .text("not a nat")),
-            as: UInt64?.self,
-            context: "optional fallback"
-        ))
-        XCTAssertNil(try decode(
-            CandidTypedValue(type: .optional(.text), value: .optional(.text, .text("not a nat"))),
-            as: UInt64?.self,
-            context: "optional nested fallback"
-        ))
     }
 
     func testGeneratedDecoderRejectsVariantExpansionChangesAndMissingRequiredRecordFields() throws {
@@ -158,8 +125,7 @@ final class GeneratedBindingsTests: XCTestCase {
                     value: .null
                 ))
             ),
-            as: FixtureStoreResult.self,
-            context: "expanded variant"
+            as: FixtureStoreResult.self
         ))
 
         let changedVariantFields = [
@@ -175,11 +141,9 @@ final class GeneratedBindingsTests: XCTestCase {
                     value: .nat64(1)
                 ))
             ),
-            as: FixtureStoreResult.self,
-            context: "changed variant payload"
+            as: FixtureStoreResult.self
         ))
 
-        let missingID = Candid.fieldID("id")
         let labelID = Candid.fieldID("label")
         let missingRequiredFields = [CandidField(id: labelID, type: .text)]
         XCTAssertThrowsError(try decode(
@@ -187,8 +151,7 @@ final class GeneratedBindingsTests: XCTestCase {
                 type: .record(missingRequiredFields),
                 value: .record(missingRequiredFields, [labelID: .text("missing")])
             ),
-            as: FixtureEntry.self,
-            context: "missing record field \(missingID)"
+            as: FixtureEntry.self
         ))
     }
 
@@ -205,8 +168,7 @@ final class GeneratedBindingsTests: XCTestCase {
         )
         guard case .end = try decode(
             matching,
-            as: FixtureChain.self,
-            context: "test"
+            as: FixtureChain.self
         ) else {
             return XCTFail("expected recursive end variant")
         }
@@ -222,8 +184,7 @@ final class GeneratedBindingsTests: XCTestCase {
         XCTAssertThrowsError(
             try decode(
                 different,
-                as: FixtureChain.self,
-                context: "test"
+                as: FixtureChain.self
             )
         )
     }

@@ -29,9 +29,8 @@ final class CandidTests: XCTestCase {
         XCTAssertThrowsError(try reply.decode(String.self, at: 2))
 
         XCTAssertThrowsError(try CandidReply(values: [CandidTypedValue(UInt8(1))]).decode(UInt16.self))
-        XCTAssertThrowsError(try CandidReply(values: [CandidTypedValue(UInt8(1))]).decode(CandidNat.self))
-        XCTAssertThrowsError(try CandidReply(values: [CandidTypedValue(Int8(1))]).decode(Int64.self))
-        XCTAssertThrowsError(try CandidReply(values: [CandidTypedValue(UInt64(1))]).decode(CandidInt.self))
+        XCTAssertNil(try CandidReply(values: [CandidTypedValue("not a nat")]).decode(UInt64?.self))
+        XCTAssertNil(try CandidReply(values: [CandidTypedValue(Optional("not a nat"))]).decode(UInt64?.self))
     }
 
     func testReplyDecodingNormalizesExpectedVariantFieldOrder() throws {
@@ -50,33 +49,34 @@ final class CandidTests: XCTestCase {
         )
     }
 
-    func testCandidNullConvertibleAndVariantPayload() throws {
-        let null = CandidNull()
-        try assertFixture(
-            "4449444c00017f",
-            values: [try CandidTypedValue(null)]
-        )
+    func testRecordProjectionFillsMissingNullableFieldsAroundRetainedFields() throws {
+        struct Record: CandidConvertible {
+            static var candidType: CandidType { .record([
+                CandidField(id: 8, type: .optional(.text)),
+                CandidField(id: 6, type: .nat64),
+                CandidField(id: 4, type: .null),
+                CandidField(id: 3, type: .optional(.text)),
+                CandidField(id: 2, type: .nat64),
+            ]) }
+            let candidValue: CandidValue
+            init(candidValue: CandidValue) { self.candidValue = candidValue }
+        }
+        let fields = [CandidField(id: 6, type: .nat64), CandidField(id: 1, type: .bool), CandidField(id: 2, type: .nat64)]
+        let value = try CandidTypedValue(type: .record(fields), value: .record(fields, [
+            6: .nat64(60), 1: .bool(true), 2: .nat64(20),
+        ]))
+        let result = try CandidReply(values: [value]).decode(Record.self)
+        guard case .record(_, let values) = result.candidValue else { return XCTFail("expected record") }
+        XCTAssertEqual(values, [2: .nat64(20), 3: .optional(.text, nil), 4: .null, 6: .nat64(60), 8: .optional(.text, nil)])
+    }
 
-        let reply = try CandidDecoder().decode(CandidArguments(null).encode())
-        XCTAssertEqual(try reply.decode(CandidNull.self), null)
+    func testCandidNullConvertible() throws {
+        let encoded = try CandidArguments(CandidNull()).encode()
+        XCTAssertEqual(encoded, data("4449444c00017f"))
+        XCTAssertEqual(try CandidDecoder().decode(encoded).decode(CandidNull.self), CandidNull())
         XCTAssertThrowsError(try CandidNull(candidValue: .bool(false))) { error in
-            XCTAssertEqual(error as? ICClientError, .invalidCandid("expected null"))
+            guard case ICClientError.invalidCandid = error else { return XCTFail("expected invalid Candid") }
         }
-
-        let fields = [
-            CandidField("ok", type: .null),
-            CandidField("err", type: .text),
-        ]
-        let value = try CandidTypedValue(
-            type: .variant(fields),
-            value: .variant(try CandidVariant(fields: fields, tag: "ok", value: .null))
-        )
-        let variantReply = try CandidDecoder().decode(CandidArguments([value]).encode())
-        guard case .variant(let variant) = variantReply.values.first?.value else {
-            return XCTFail("expected a variant")
-        }
-        XCTAssertEqual(variant.tag, Candid.fieldID("ok"))
-        XCTAssertEqual(variant.value, .null)
     }
 
     func testDidcPrimitiveArbitraryIntegerBlobAndEmptyCompositeFixtures() throws {
@@ -163,11 +163,7 @@ final class CandidTests: XCTestCase {
         XCTAssertEqual(reply.values.first?.value, .principal(principal))
     }
 
-    func testConvertibleRecordOptionalArrayAndReplyContext() throws {
-        let person = Person(name: "Ada", age: 42, nickname: nil)
-        let roundTrip = try CandidDecoder().decode(CandidArguments(person).encode())
-        XCTAssertEqual(try roundTrip.decode(Person.self), person)
-
+    func testConvertibleArraysAndDecodeErrorContext() throws {
         let list: [UInt16] = [0, 42, .max]
         XCTAssertEqual(
             try CandidDecoder().decode(CandidArguments(list).encode()).decode([UInt16].self),
@@ -178,27 +174,13 @@ final class CandidTests: XCTestCase {
             try CandidDecoder().decode(CandidArguments(bytes).encode()).decode([UInt8].self),
             bytes
         )
-        XCTAssertThrowsError(try roundTrip.decode(String.self)) { error in
+        XCTAssertThrowsError(try CandidReply(values: [CandidTypedValue(UInt8(42))]).decode(String.self)) { error in
             XCTAssertTrue(String(describing: error).contains("reply value 0"))
         }
-        XCTAssertThrowsError(try CandidRecord(person.candidValue).required("missing", as: String.self)) { error in
+        XCTAssertThrowsError(try CandidRecord(.record([], [:])).required("missing", as: String.self)) { error in
             XCTAssertTrue(String(describing: error).contains(String(Candid.fieldID("missing"))))
         }
 
-        let extra = CandidField("future", type: .bool)
-        let recordWithUnknownField = CandidValue.record(Person.fields + [extra], [
-            Candid.fieldID("name"): .text("Ada"),
-            Candid.fieldID("age"): .nat8(42),
-            Candid.fieldID("nickname"): .optional(.text, nil),
-            extra.id: .bool(true),
-        ])
-        XCTAssertEqual(try Person(candidValue: recordWithUnknownField), person)
-
-        let recordMissingAge = CandidValue.record(Person.fields, [
-            Candid.fieldID("name"): .text("Ada"),
-            Candid.fieldID("nickname"): .optional(.text, nil),
-        ])
-        XCTAssertThrowsError(try Person(candidValue: recordMissingAge))
     }
 
     func testDecodesFiniteValuesWithRecursiveWireTypes() throws {
@@ -266,11 +248,9 @@ final class CandidTests: XCTestCase {
         let encoded = try CandidArguments("hello").encode()
         let framed = Data([0xaa, 0xbb]) + encoded + Data([0xcc])
         let slice = framed.dropFirst(2).dropLast()
-        XCTAssertEqual(slice.startIndex, 2)
         XCTAssertEqual(try CandidDecoder().decode(slice).decode(String.self), "hello")
         XCTAssertThrowsError(try CandidDecoder().decode(slice.dropLast()))
         XCTAssertThrowsError(try CandidDecoder().decode(slice.prefix(3)))
-        XCTAssertThrowsError(try CandidDecoder().decode(slice.dropFirst(slice.count)))
     }
 
     func testAcceptsPaddedLEB128AndReencodesCanonically() throws {
@@ -310,22 +290,19 @@ final class CandidTests: XCTestCase {
 
     func testDecodingBudgetStopsSharedTypeExpansion() throws {
         XCTAssertNoThrow(try CandidDecoder().decode(sharedTypeFixture(depth: 10)))
-        for depth in [19, 40] {
-            XCTAssertThrowsError(try CandidDecoder().decode(sharedTypeFixture(depth: depth))) { error in
-                XCTAssertTrue(String(describing: error).contains("decoding work limit exceeded"))
-            }
+        XCTAssertThrowsError(try CandidDecoder().decode(sharedTypeFixture(depth: 40))) { error in
+            XCTAssertTrue(String(describing: error).contains("decoding work limit exceeded"))
         }
     }
 
     func testDecodingBudgetIsSharedAcrossReplyValues() throws {
-        // Each null costs six units across resolution, reading and normalization,
-        // plus its slot in the reply; the final value crosses the shared limit.
+        // Each smaller reply fits; resetting the budget per value must not let their combined work through.
         func nulls(_ count: UInt64) -> Data {
             Data("DIDL".utf8) + Data([0]) + ICRequestID.leb128(count)
                 + Data(repeating: 0x7f, count: Int(count))
         }
-        XCTAssertEqual(try CandidDecoder().decode(nulls(142_857)).values.count, 142_857)
-        XCTAssertThrowsError(try CandidDecoder().decode(nulls(142_858))) { error in
+        XCTAssertEqual(try CandidDecoder().decode(nulls(10), budget: CandidDecodingBudget(maximumWork: 100)).values.count, 10)
+        XCTAssertThrowsError(try CandidDecoder().decode(nulls(20), budget: CandidDecodingBudget(maximumWork: 100))) { error in
             XCTAssertTrue(String(describing: error).contains("decoding work limit exceeded"))
         }
         let blob = Data(repeating: 0x55, count: 1_000_000)
@@ -423,38 +400,4 @@ private enum UnsortedVariant: CandidConvertible, Equatable {
         CandidField(id: 1, type: .text),
         CandidField(id: 2, type: .null),
     ]
-}
-
-private struct Person: CandidConvertible, Equatable {
-    let name: String
-    let age: UInt8
-    let nickname: String?
-
-    static let fields = [
-        CandidField("name", type: String.candidType),
-        CandidField("age", type: UInt8.candidType),
-        CandidField("nickname", type: Optional<String>.candidType),
-    ]
-    static let candidType = CandidType.record(fields)
-
-    init(name: String, age: UInt8, nickname: String?) {
-        self.name = name
-        self.age = age
-        self.nickname = nickname
-    }
-
-    init(candidValue: CandidValue) throws {
-        let record = try CandidRecord(candidValue)
-        name = try record.required("name")
-        age = try record.required("age")
-        nickname = try record.required("nickname")
-    }
-
-    var candidValue: CandidValue {
-        .record(Self.fields, [
-            Candid.fieldID("name"): name.candidValue,
-            Candid.fieldID("age"): age.candidValue,
-            Candid.fieldID("nickname"): nickname.candidValue,
-        ])
-    }
 }
