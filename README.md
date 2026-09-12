@@ -1,6 +1,6 @@
 # ICNativeClient
 
-ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.7 adds expiring delegated sessions from existing Ed25519 keys without retaining the root secret.
+ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.8 improves Candid processing and binding generation while preserving public APIs and wire formats.
 
 It includes principal/account helpers, a Candid DIDL codec, explicit Swift model conversion, and raw Candid-byte transport.
 
@@ -311,6 +311,10 @@ let sharedStore = ICIdentityStore(
 ```
 
 Every participating target must include that access group in its Keychain Sharing entitlement. ICNativeClient does not migrate items between access groups or from application-specific storage formats. If the shared item is initially absent, authenticate and save the session from the main application before an extension attempts to load it. An invalid access group or missing entitlement is reported as `ICClientError.keychainFailure`.
+
+## New in 0.7.8
+
+0.7.8 is a backward-compatible patch release. Candid encoding reuses validated values, record projection uses a linear field scan, and binding generation avoids repeated keyword-set allocation. Redundant tests and unused internals have been removed, while delegation limits, signature validation, and shared decoding budgets retain focused regression checks. Public APIs, accepted inputs, session storage, wire formats, and default limits are unchanged. The bundled generator remains version 0.1.3, with rebuilt arm64 and x86_64 binaries and unchanged generated Swift output.
 
 ## New in 0.7.7
 

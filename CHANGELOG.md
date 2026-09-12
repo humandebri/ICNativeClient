@@ -2,6 +2,20 @@
 
 All notable changes are documented here.
 
+## [0.7.8] - 2026-09-12
+
+### Changed
+
+- Reuse validated Candid values during encoding and scan sorted record fields linearly during reply projection.
+- Avoid repeated keyword-set allocation in the Swift binding generator and rebuild both bundled macOS architectures.
+- Remove unused internal functions, parameters, and unreachable branches.
+- Consolidate redundant tests, remove real polling waits from transport tests, and replace ineffective delegation-limit and OID cases with otherwise-valid inputs. Verify shared decoding budgets with smaller fixtures.
+- Compile the plugin fixture in the renamed-checkout CI job without repeating its runtime tests.
+
+### Compatibility
+
+- Public APIs, accepted inputs, session storage, wire formats, generated Swift output, and default limits are unchanged. The bundled generator remains version 0.1.3.
+
 ## [0.7.7] - 2026-09-09
 
 ### Added
