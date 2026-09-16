@@ -2,7 +2,7 @@
 
 All notable changes are documented here.
 
-## [Unreleased]
+## [0.8.0] - 2026-09-16
 
 ### Added
 
