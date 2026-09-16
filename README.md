@@ -1,6 +1,6 @@
 # ICNativeClient
 
-ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.7.8 improves Candid processing and binding generation while preserving public APIs and wire formats.
+ICNativeClient is a Swift package for calling Internet Computer canisters from native Apple applications. Version 0.8.0 adds constrained child delegations, update request IDs, certified request-status checks, per-request ingress options, and persistable signed requests.
 
 It includes principal/account helpers, a Candid DIDL codec, explicit Swift model conversion, and raw Candid-byte transport.
 
@@ -178,6 +178,73 @@ let updateReply = try await client.callRaw(
 )
 ```
 
+To keep an update's ingress request ID before polling completes, submit and complete it separately:
+
+```swift
+let submission = try await client.submitRaw(
+    method: "some_update",
+    arg: candidUpdateArgument,
+    identity: identity
+)
+let requestID = submission.requestID
+let updateReply = try await client.completeRaw(submission, identity: identity)
+```
+
+`submitCandid` and `completeCandid` provide the same split flow for `CandidArguments` and `CandidReply`. A v4 response that already contains a certified result is retained in the submission and completed without another network request. Pending v4 and accepted v2 calls are polled by `completeRaw` or `completeCandid`; if polling times out, the caller still owns the submission and its request ID. Transport failures and non-replicated rejections throw before a submission is returned.
+
+Use `requestStatus` to make one certified status check without entering the polling loop:
+
+```swift
+switch try await client.requestStatus(for: submission, identity: identity) {
+case .absent, .received, .processing:
+    // Retain its request ID and effective canister ID, then check again later.
+case .replied(let bytes):
+    consume(bytes)
+case .rejected(let reject):
+    handle(reject)
+case .done:
+    handleDoneWithoutReply()
+}
+```
+
+`requestStatus(requestID:effectiveCanisterId:identity:)` performs the same single check after an app restart when only the request ID and effective canister ID were retained.
+
+Set an absolute ingress expiry or an optional nonce per request. Explicit expiries must be in the next five minutes and cannot outlive the session delegation; nonces must contain 1–32 bytes.
+
+The options variants are overloads. The original query and call signatures remain available, including when methods are stored as function values; they delegate to the options variants with `.default`.
+
+```swift
+let options = ICRequestOptions(
+    ingressExpiry: Date().addingTimeInterval(120),
+    nonce: requestNonce
+)
+let submission = try await client.submitRaw(
+    method: "some_update",
+    arg: candidUpdateArgument,
+    identity: identity,
+    options: options
+)
+```
+
+For queueing or persistence before transport, create a complete signed envelope and send the exact same request later:
+
+```swift
+let signed = try client.signUpdate(
+    method: "some_update",
+    arg: candidUpdateArgument,
+    identity: identity,
+    options: options
+)
+let stored = try JSONEncoder().encode(signed)
+
+let restored = try JSONDecoder().decode(ICSignedUpdate.self, from: stored)
+let submission = try await client.submitSigned(restored)
+```
+
+`signQuery`, `querySigned`, and `unsafeQuerySigned` provide the corresponding query flow. Before transport, persisted signed requests are checked against their envelope, request ID, delegation constraints, and signatures. A signed envelope contains no private key, but it authorizes the encoded ingress request until expiry and should be stored as sensitive application data.
+
+The request ID is the 32-byte hash identifying the exact IC ingress message. It is not a ledger transaction index or a ledger-specific transaction hash.
+
 Management-canister queries keep `aaaaa-aa` in the signed request content while routing to the subnet that hosts the target canister:
 
 ```swift
@@ -284,6 +351,27 @@ The lifetime comes from `options.maxTimeToLiveNanoseconds`, or otherwise from `c
 
 `internetIdentityURL` and `derivationOrigin` remain configuration bindings in the existing storage format; this operation does not contact those URLs and they do not affect the root-key principal. Existing sessions require no storage migration.
 
+## Child delegations
+
+An existing session can sign one child delegation for a caller-owned DER public key without exposing its session private key:
+
+```swift
+let child = try identity.childDelegation(
+    for: childDERPublicKey,
+    options: ICChildDelegationOptions(
+        maxTimeToLiveNanoseconds: 3_600_000_000_000,
+        targets: [configuration.canisterId],
+        permissions: .all
+    )
+)
+let childChain = ICDelegationChain(
+    publicKey: identity.delegation.publicKey,
+    delegations: identity.delegation.delegations + [child]
+)
+```
+
+Only the signed child entry is returned. The recipient must combine it with the session's public parent chain and hold the private key corresponding to `childDERPublicKey`. An omitted lifetime uses the earliest parent expiration. Omitted targets and permissions inherit the parent chain's effective restrictions. Explicit values may narrow those restrictions but cannot expand them; excessive lifetimes, invalid DER keys, cycles, expired parents, and chains at the maximum depth are rejected.
+
 ## Session storage
 
 `ICAuthSession` is not `Codable` and exposes no private-key accessor. `ICIdentityStore` keeps the secret in an internal storage DTO and Keychain item protected with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`.
@@ -311,6 +399,10 @@ let sharedStore = ICIdentityStore(
 ```
 
 Every participating target must include that access group in its Keychain Sharing entitlement. ICNativeClient does not migrate items between access groups or from application-specific storage formats. If the shared item is initially absent, authenticate and save the session from the main application before an extension attempts to load it. An invalid access group or missing entitlement is reported as `ICClientError.keychainFailure`.
+
+## New in 0.8.0
+
+0.8.0 adds `ICAuthSession.childDelegation(for:options:)` for issuing constrained child delegations without exposing session private keys. Update calls can be split into submit and complete phases so applications retain the 32-byte ingress request ID before polling, and certified single-shot status APIs distinguish received, processing, replied, rejected, and done states. Raw, Candid, and typed requests accept per-request ingress expiry and nonce options, while signed query and update envelopes can be persisted and validated before transport. Existing query and call signatures, generated bindings, session storage, and default wire formats remain compatible. The bundled generator remains version 0.1.3.
 
 ## New in 0.7.8
 

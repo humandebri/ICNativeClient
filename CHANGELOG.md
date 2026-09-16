@@ -2,6 +2,20 @@
 
 All notable changes are documented here.
 
+## [0.8.0] - 2026-09-16
+
+### Added
+
+- Add `ICAuthSession.childDelegation(for:options:)` to sign a constrained child delegation for a caller-owned DER public key without exposing the session private key.
+- Add split `submitRaw`/`completeRaw` and `submitCandid`/`completeCandid` update APIs so callers can retain the ingress request ID before polling completes.
+- Add certified single-shot `requestStatus` APIs that distinguish absent, received, processing, replied, rejected, and done ingress states.
+- Add per-request absolute ingress expiry and nonce options across Raw, Candid, and typed query/update APIs.
+- Add codable `ICSignedQuery` and `ICSignedUpdate` envelopes with local signing, persisted-request validation, and separate send APIs.
+
+### Compatibility
+
+- Existing call sites and query/call method references retain their original signatures; generated bindings, stored sessions, and default wire formats are unchanged.
+
 ## [0.7.8] - 2026-09-12
 
 ### Changed

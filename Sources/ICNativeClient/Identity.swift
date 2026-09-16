@@ -56,6 +56,90 @@ public struct ICAuthSession: Equatable, Sendable {
         return session
     }
 
+    /// Signs one child delegation for a caller-owned DER public key without exposing the session private key.
+    /// The returned value must be appended to this session's public delegation chain before use.
+    public func childDelegation(
+        for derPublicKey: Data,
+        options: ICChildDelegationOptions = .default
+    ) throws -> ICDelegationChain.SignedDelegation {
+        try childDelegation(for: derPublicKey, options: options, now: Date())
+    }
+
+    func childDelegation(
+        for derPublicKey: Data,
+        options: ICChildDelegationOptions,
+        now: Date
+    ) throws -> ICDelegationChain.SignedDelegation {
+        guard delegation.delegations.count < ICIdentityValidation.maximumDelegationDepth else {
+            throw ICClientError.invalidIdentity("Delegation chain is already at the maximum depth.")
+        }
+        try ICIdentityValidation.validateChildPublicKey(derPublicKey)
+
+        let observedKeys = Set([delegation.publicKey] + delegation.delegations.map(\.delegation.publicKey))
+        guard !observedKeys.contains(derPublicKey) else {
+            throw ICClientError.invalidIdentity("Child delegation public key would create a cycle.")
+        }
+
+        let privateKey: Curve25519.Signing.PrivateKey
+        do { privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: sessionPrivateKey) }
+        catch { throw ICClientError.invalidIdentity("Session private key is invalid.") }
+        guard ICRC167Codec.derPublicKey(from: privateKey.publicKey.rawRepresentation) == sessionPublicKey else {
+            throw ICClientError.invalidIdentity("Session private and public keys do not match.")
+        }
+
+        let nowNS = try ICIdentityValidation.nanosecondsSinceEpoch(now)
+        guard let parentExpiration = delegation.delegations.map(\.delegation.expiration).min(),
+              parentExpiration > nowNS else {
+            throw ICClientError.expiredDelegation
+        }
+        let expiration: UInt64
+        if let ttl = options.maxTimeToLiveNanoseconds {
+            let (requestedExpiration, overflow) = nowNS.addingReportingOverflow(ttl)
+            guard !overflow, requestedExpiration <= parentExpiration else {
+                throw ICClientError.invalidIdentity("Child delegation lifetime exceeds its parent delegation.")
+            }
+            expiration = requestedExpiration
+        } else {
+            expiration = parentExpiration
+        }
+
+        let parentTargetSets = delegation.delegations.compactMap { signed -> Set<Data>? in
+            signed.delegation.targets.map(Set.init)
+        }
+        let effectiveParentTargets = parentTargetSets.first.map { first in
+            parentTargetSets.dropFirst().reduce(first) { $0.intersection($1) }
+        }
+        let targets = try options.targets.map { values -> [Data] in
+            let parsed = try values.map { value -> Data in
+                guard let principal = ICPrincipal.parse(value) else {
+                    throw ICClientError.invalidCanisterId
+                }
+                return principal
+            }
+            if let effectiveParentTargets,
+               !Set(parsed).isSubset(of: effectiveParentTargets) {
+                throw ICClientError.invalidIdentity("Child delegation targets exceed the parent delegation scope.")
+            }
+            return parsed
+        }
+
+        let parentIsQueryOnly = delegation.delegations.contains { $0.delegation.permissions == .queries }
+        if parentIsQueryOnly, options.permissions == .all {
+            throw ICClientError.invalidIdentity("Child delegation permissions exceed the parent delegation scope.")
+        }
+
+        let child = ICDelegationChain.SignedDelegation.Delegation(
+            publicKey: derPublicKey,
+            expiration: expiration,
+            targets: targets,
+            permissions: options.permissions
+        )
+        return .init(
+            delegation: child,
+            signature: try privateKey.signature(for: ICIdentityValidation.delegationSignable(child))
+        )
+    }
+
     public var formatVersion: Int { storage.formatVersion }
     public var principal: String { storage.principal }
     public var canisterId: String { storage.canisterId }
@@ -346,6 +430,57 @@ enum ICIdentityValidation {
         guard !ttlOverflow, !skewOverflow, earliestExpiration <= maximumExpiry else { throw ICClientError.invalidPayload }
     }
 
+    /// Validates the public delegation material embedded in a persisted ingress envelope.
+    /// Returns the leaf key that must have signed the ingress request itself.
+    static func validateEnvelopeDelegationChain(
+        _ chain: ICDelegationChain,
+        canisterId: String,
+        permission: ICRequestPermission,
+        requestExpiration: UInt64,
+        trustRoot: ICTrustRoot,
+        now: Date = Date()
+    ) throws -> Data {
+        guard !chain.publicKey.isEmpty,
+              !chain.delegations.isEmpty,
+              chain.delegations.count <= maximumDelegationDepth,
+              let canister = ICPrincipal.parse(canisterId) else {
+            throw ICClientError.invalidIdentity("Signed request delegation chain is invalid.")
+        }
+        let nowNS = try nanosecondsSinceEpoch(now)
+        var signerKey = chain.publicKey
+        var observedKeys = Set<Data>([signerKey])
+        for signed in chain.delegations {
+            let delegation = signed.delegation
+            guard !delegation.publicKey.isEmpty,
+                  !signed.signature.isEmpty,
+                  observedKeys.insert(delegation.publicKey).inserted,
+                  delegation.expiration > nowNS,
+                  delegation.expiration >= requestExpiration else {
+                throw ICClientError.invalidIdentity("Signed request delegation is expired or cyclic.")
+            }
+            if let targets = delegation.targets {
+                guard !targets.isEmpty,
+                      targets.count <= maximumTargetsPerDelegation,
+                      Set(targets).count == targets.count,
+                      targets.allSatisfy({ $0.count <= 29 }),
+                      targets.contains(canister) else {
+                    throw ICClientError.invalidIdentity("Signed request exceeds its delegation targets.")
+                }
+            }
+            if delegation.permissions == .queries, permission == .call {
+                throw ICClientError.invalidIdentity("Signed request exceeds its delegation permissions.")
+            }
+            try verify(
+                signature: signed.signature,
+                payload: delegationSignable(delegation),
+                signerDERKey: signerKey,
+                trustRoot: trustRoot
+            )
+            signerKey = delegation.publicKey
+        }
+        return signerKey
+    }
+
     static func delegationSignable(_ delegation: ICDelegationChain.SignedDelegation.Delegation) -> Data {
         var fields: [(ICCBOR.Value, ICCBOR.Value)] = [
             (.text("pubkey"), .bytes(delegation.publicKey)),
@@ -354,6 +489,39 @@ enum ICIdentityValidation {
         if let targets = delegation.targets { fields.append((.text("targets"), .array(targets.map(ICCBOR.Value.bytes)))) }
         if let permissions = delegation.permissions { fields.append((.text("permissions"), .text(permissions.rawValue))) }
         return Data([0x1a]) + Data("ic-request-auth-delegation".utf8) + ICRequestID.hash(of: .map(fields))
+    }
+
+    fileprivate static func validateChildPublicKey(_ derPublicKey: Data) throws {
+        let spki: ICDERSubjectPublicKeyInfo
+        do {
+            spki = try ICDERSubjectPublicKeyInfo(data: derPublicKey)
+        } catch {
+            throw ICClientError.invalidIdentity("Child delegation public key is not valid DER.")
+        }
+        switch spki.algorithmOID {
+        case ICDERSubjectPublicKeyInfo.ed25519OID:
+            guard spki.parametersOID == nil,
+                  spki.key.count == 32,
+                  (try? Curve25519.Signing.PublicKey(rawRepresentation: spki.key)) != nil else {
+                throw ICClientError.invalidIdentity("Child Ed25519 public key is invalid.")
+            }
+        case ICDERSubjectPublicKeyInfo.ecPublicKeyOID:
+            guard spki.parametersOID == ICDERSubjectPublicKeyInfo.prime256v1OID,
+                  spki.key.count == 65,
+                  spki.key.first == 0x04,
+                  (try? P256.Signing.PublicKey(x963Representation: spki.key)) != nil else {
+                throw ICClientError.invalidIdentity("Child P-256 public key is invalid.")
+            }
+        case ICDERSubjectPublicKeyInfo.canisterSignatureOID:
+            guard spki.parametersOID == nil,
+                  let canisterLength = spki.key.first.map(Int.init),
+                  canisterLength <= 29,
+                  spki.key.count >= 1 + canisterLength else {
+                throw ICClientError.invalidIdentity("Child canister-signature public key is invalid.")
+            }
+        default:
+            throw ICClientError.invalidIdentity("Child delegation public key uses an unsupported algorithm.")
+        }
     }
 
     private static func verify(
@@ -398,7 +566,7 @@ enum ICIdentityValidation {
         }
     }
 
-    private static func nanosecondsSinceEpoch(_ date: Date) throws -> UInt64 {
+    fileprivate static func nanosecondsSinceEpoch(_ date: Date) throws -> UInt64 {
         let seconds = date.timeIntervalSince1970
         guard seconds >= 0, seconds <= Double(UInt64.max) / 1_000_000_000 else { throw ICClientError.invalidPayload }
         return UInt64(seconds * 1_000_000_000)
