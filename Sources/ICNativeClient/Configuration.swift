@@ -135,6 +135,66 @@ public struct ICAuthenticationOptions: Equatable, Sendable {
     }
 }
 
+public struct ICChildDelegationOptions: Equatable, Sendable {
+    public static let `default` = ICChildDelegationOptions(
+        validatedMaxTimeToLiveNanoseconds: nil,
+        canonicalTargets: nil,
+        permissions: nil
+    )
+
+    public let maxTimeToLiveNanoseconds: UInt64?
+    public let targets: [String]?
+    public let permissions: ICDelegationPermission?
+
+    public init(
+        maxTimeToLiveNanoseconds: UInt64? = nil,
+        targets: [String]? = nil,
+        permissions: ICDelegationPermission? = nil
+    ) throws {
+        if let maxTimeToLiveNanoseconds {
+            guard maxTimeToLiveNanoseconds > 0,
+                  maxTimeToLiveNanoseconds <= ICClientConfiguration.maximumDelegationTTLNanoseconds else {
+                throw ICClientError.invalidConfiguration("Child delegation lifetime must be between 1 ns and 30 days.")
+            }
+        }
+
+        let canonicalTargets: [String]?
+        if let targets {
+            guard !targets.isEmpty, targets.count <= ICAuthenticationOptions.maximumTargets else {
+                throw ICClientError.invalidConfiguration("Child delegation targets must contain between 1 and 1000 canister IDs.")
+            }
+            let parsed = try targets.map { target -> String in
+                guard let principal = ICPrincipal.parse(target) else {
+                    throw ICClientError.invalidConfiguration("Child delegation target is not a valid principal: \(target)")
+                }
+                return ICPrincipal.text(from: principal)
+            }
+            guard Set(parsed).count == parsed.count else {
+                throw ICClientError.invalidConfiguration("Child delegation targets must not contain duplicates.")
+            }
+            canonicalTargets = parsed
+        } else {
+            canonicalTargets = nil
+        }
+
+        self.init(
+            validatedMaxTimeToLiveNanoseconds: maxTimeToLiveNanoseconds,
+            canonicalTargets: canonicalTargets,
+            permissions: permissions
+        )
+    }
+
+    private init(
+        validatedMaxTimeToLiveNanoseconds: UInt64?,
+        canonicalTargets: [String]?,
+        permissions: ICDelegationPermission?
+    ) {
+        maxTimeToLiveNanoseconds = validatedMaxTimeToLiveNanoseconds
+        targets = canonicalTargets
+        self.permissions = permissions
+    }
+}
+
 public struct ICClientConfiguration: Equatable, Sendable {
     public static let defaultDelegationTTLNanoseconds: UInt64 = 28_800_000_000_000
     public static let maximumDelegationTTLNanoseconds: UInt64 = 2_592_000_000_000_000

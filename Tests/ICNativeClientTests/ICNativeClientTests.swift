@@ -14,6 +14,29 @@ final class ICNativeClientTests: XCTestCase {
         super.tearDown()
     }
 
+    func testLegacyQueryAndCallMethodReferencesRemainSourceCompatible() throws {
+        let configuredClient = client(try configuration(root: BLSTKey(seed: 44).derPublicKey))
+
+        let queryRaw: (String, Data, String?, String?, String?, ICAuthSession?) async throws -> Data = configuredClient.queryRaw
+        let unsafeQueryRaw: (String, Data, String?, String?, String?, ICAuthSession?) async throws -> Data = configuredClient.unsafeQueryRaw
+        let queryCandid: (String, CandidArguments, String?, String?, String?, ICAuthSession?) async throws -> CandidReply = configuredClient.queryCandid
+        let typedQuery: (String, CandidArguments, String?, String?, String?, ICAuthSession?, String.Type) async throws -> String = configuredClient.query
+        let convertedQuery: (String, UInt64, String?, String?, String?, ICAuthSession?, String.Type) async throws -> String = configuredClient.query
+        let callRaw: (String, Data, String?, String?, ICAuthSession) async throws -> Data = configuredClient.callRaw
+        let callCandid: (String, CandidArguments, String?, String?, ICAuthSession) async throws -> CandidReply = configuredClient.callCandid
+        let typedCall: (String, CandidArguments, String?, String?, ICAuthSession, String.Type) async throws -> String = configuredClient.call
+        let convertedCall: (String, UInt64, String?, String?, ICAuthSession, String.Type) async throws -> String = configuredClient.call
+
+        _ = (
+            queryRaw, unsafeQueryRaw, queryCandid, typedQuery, convertedQuery,
+            callRaw, callCandid, typedCall, convertedCall
+        )
+
+        let queryWithOptions: (String, Data, String?, String?, String?, ICAuthSession?, ICRequestOptions) async throws -> Data = configuredClient.queryRaw
+        let callWithOptions: (String, Data, String?, String?, ICAuthSession, ICRequestOptions) async throws -> Data = configuredClient.callRaw
+        _ = (queryWithOptions, callWithOptions)
+    }
+
     func testEd25519DelegatingCreatesFreshSessionsWithoutRetainingRootKey() throws {
         let config = try configuration(root: BLSTKey(seed: 1).derPublicKey)
         let rootKey = Curve25519.Signing.PrivateKey()
@@ -57,6 +80,165 @@ final class ICNativeClientTests: XCTestCase {
             options: ICAuthenticationOptions(maxTimeToLiveNanoseconds: ICClientConfiguration.maximumDelegationTTLNanoseconds)
         )
         XCTAssertNoThrow(try ICIdentityValidation.validateSession(maximum, configuration: config))
+    }
+
+    func testChildDelegationSignsCallerPublicKeyWithoutMutatingSession() throws {
+        let config = try configuration(root: BLSTKey(seed: 33).derPublicKey)
+        let sessionKey = Curve25519.Signing.PrivateKey()
+        let session = try makeAuthSession(
+            config: config,
+            session: sessionKey,
+            targets: [try XCTUnwrap(ICPrincipal.parse(canisterText))]
+        )
+        let originalStorage = session.storage
+        let childKey = Curve25519.Signing.PrivateKey()
+        let childDER = ICRC167Codec.derPublicKey(from: childKey.publicKey.rawRepresentation)
+        let now = session.requestedAt
+        let child = try session.childDelegation(
+            for: childDER,
+            options: ICChildDelegationOptions(
+                maxTimeToLiveNanoseconds: 60_000_000_000,
+                targets: [canisterText],
+                permissions: .queries
+            ),
+            now: now
+        )
+
+        XCTAssertEqual(child.delegation.publicKey, childDER)
+        XCTAssertEqual(child.delegation.expiration, nanoseconds(now) + 60_000_000_000)
+        XCTAssertEqual(child.delegation.targets, [try XCTUnwrap(ICPrincipal.parse(canisterText))])
+        XCTAssertEqual(child.delegation.permissions, .queries)
+        XCTAssertTrue(sessionKey.publicKey.isValidSignature(
+            child.signature,
+            for: delegationSignable(child.delegation)
+        ))
+        XCTAssertEqual(session.storage, originalStorage)
+
+        let childChain = ICDelegationChain(
+            publicKey: session.delegation.publicKey,
+            delegations: session.delegation.delegations + [child]
+        )
+        XCTAssertNoThrow(try ICIdentityValidation.validateDelegationChain(
+            childChain,
+            expectedSessionPublicKey: childDER,
+            canisterId: config.canisterId,
+            requestedAt: session.requestedAt,
+            maxTimeToLiveNanoseconds: session.maxTimeToLiveNanoseconds,
+            permission: .query,
+            trustRoot: config.trustRoot,
+            now: now
+        ))
+        let childSession = ICAuthSession(storage: replacing(
+            session.storage,
+            chain: childChain,
+            sessionPublicKey: childDER,
+            privateKey: childKey.rawRepresentation
+        ))
+        XCTAssertNoThrow(try ICIdentityValidation.validateSession(
+            childSession,
+            configuration: config,
+            permission: .query,
+            now: now
+        ))
+        let envelope = try ICClient.signedEnvelope(
+            content: .map([(.text("request_type"), .text("query"))]),
+            identity: childSession
+        )
+        guard let delegationValue = ICCBOR.mapValue(
+            try ICCBOR.decodeStrict(envelope),
+            key: "sender_delegation"
+        ), case .array(let envelopeDelegations) = delegationValue else {
+            return XCTFail("expected child delegation chain in signed envelope")
+        }
+        XCTAssertEqual(envelopeDelegations.count, 2)
+    }
+
+    func testChildDelegationInheritsBoundsAndRejectsScopeExpansion() throws {
+        let config = try configuration(root: BLSTKey(seed: 34).derPublicKey)
+        let target = try XCTUnwrap(ICPrincipal.parse(canisterText))
+        let session = try makeAuthSession(config: config, targets: [target], permission: .queries)
+        let childDER = ICRC167Codec.derPublicKey(from: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation)
+        let defaultChild = try session.childDelegation(for: childDER, options: .default, now: session.requestedAt)
+        XCTAssertEqual(defaultChild.delegation.expiration, session.delegation.delegations[0].delegation.expiration)
+        XCTAssertNil(defaultChild.delegation.targets)
+        XCTAssertNil(defaultChild.delegation.permissions)
+
+        XCTAssertThrowsError(try session.childDelegation(
+            for: childDER,
+            options: ICChildDelegationOptions(targets: ["aaaaa-aa"]),
+            now: session.requestedAt
+        ))
+        XCTAssertThrowsError(try session.childDelegation(
+            for: childDER,
+            options: ICChildDelegationOptions(permissions: .all),
+            now: session.requestedAt
+        ))
+        XCTAssertThrowsError(try session.childDelegation(
+            for: childDER,
+            options: ICChildDelegationOptions(maxTimeToLiveNanoseconds: 3_601_000_000_000),
+            now: session.requestedAt
+        ))
+        XCTAssertThrowsError(try session.childDelegation(
+            for: session.sessionPublicKey,
+            options: .default,
+            now: session.requestedAt
+        ))
+        XCTAssertThrowsError(try session.childDelegation(
+            for: Data([0x30, 0x00]),
+            options: .default,
+            now: session.requestedAt
+        ))
+        let shortEd25519 = subjectPublicKeyDER(
+            algorithmOID: Data([0x2b, 0x65, 0x70]),
+            key: Data([0x01])
+        )
+        XCTAssertThrowsError(try session.childDelegation(
+            for: shortEd25519,
+            options: .default,
+            now: session.requestedAt
+        ))
+        let invalidP256 = ecPublicKeyDER(key: Data(repeating: 0, count: 65))
+        XCTAssertThrowsError(try session.childDelegation(
+            for: invalidP256,
+            options: .default,
+            now: session.requestedAt
+        ))
+        let unsupported = subjectPublicKeyDER(
+            algorithmOID: Data([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01]),
+            key: Data(repeating: 0x01, count: 32)
+        )
+        XCTAssertThrowsError(try session.childDelegation(
+            for: unsupported,
+            options: .default,
+            now: session.requestedAt
+        ))
+        let p256Child = P256.Signing.PrivateKey().publicKey.derRepresentation
+        XCTAssertNoThrow(try session.childDelegation(
+            for: p256Child,
+            options: .default,
+            now: session.requestedAt
+        ))
+        XCTAssertThrowsError(try session.childDelegation(
+            for: childDER,
+            options: .default,
+            now: session.requestedAt.addingTimeInterval(3_601)
+        ))
+        XCTAssertThrowsError(try ICChildDelegationOptions(maxTimeToLiveNanoseconds: 0))
+        XCTAssertThrowsError(try ICChildDelegationOptions(targets: [canisterText, canisterText]))
+
+        let fullChain = ICDelegationChain(
+            publicKey: session.delegation.publicKey,
+            delegations: Array(
+                repeating: session.delegation.delegations[0],
+                count: ICIdentityValidation.maximumDelegationDepth
+            )
+        )
+        let fullSession = ICAuthSession(storage: replacing(session.storage, chain: fullChain))
+        XCTAssertThrowsError(try fullSession.childDelegation(
+            for: childDER,
+            options: .default,
+            now: session.requestedAt
+        ))
     }
 
 #if canImport(UIKit)
@@ -1059,14 +1241,20 @@ final class ICNativeClientTests: XCTestCase {
         ]).encode()
         let lock = NSLock()
         var sentArgument: Data?
+        var sentRequestID: Data?
+        var callRequests = 0
 
         URLProtocolStub.handler = { request in
             let content = try requestContent(request)
             guard case .bytes(let argument) = ICCBOR.mapValue(content, key: "arg") else {
                 throw ICClientError.invalidResponse("call arg")
             }
-            lock.withLock { sentArgument = argument }
             let requestID = ICRequestID.hash(of: content)
+            lock.withLock {
+                sentArgument = argument
+                sentRequestID = requestID
+                callRequests += 1
+            }
             let base = [Data("request_status".utf8), requestID]
             let certificate = try self.makeCertificate(leaves: [
                 ([Data("time".utf8)], ICRequestID.leb128(self.nanoseconds(Date()))),
@@ -1086,6 +1274,19 @@ final class ICNativeClientTests: XCTestCase {
         )
         XCTAssertEqual(result, "updated")
         XCTAssertEqual(lock.withLock { sentArgument }, expectedArgument)
+
+        let configuredClient = client(config)
+        let submission = try await configuredClient.submitCandid(
+            method: "submitted-update",
+            arguments: CandidArguments(UInt64(7)),
+            identity: identity
+        )
+        XCTAssertEqual(submission.requestID, lock.withLock { sentRequestID })
+        XCTAssertEqual(submission.requestID.count, 32)
+        XCTAssertEqual(submission.effectiveCanisterId, canisterText)
+        let submittedReply = try await configuredClient.completeCandid(submission, identity: identity)
+        XCTAssertEqual(try submittedReply.decode(String.self), "updated")
+        XCTAssertEqual(lock.withLock { callRequests }, 2)
 
         URLProtocolStub.handler = { request in response(request, status: 200, body: ICCBOR.encode(.map([
             (.text("status"), .text("non_replicated_rejection")),
@@ -1123,9 +1324,10 @@ final class ICNativeClientTests: XCTestCase {
             ], key: root)
             return response(request, status: 200, body: readStateResponse(certificate))
         }
-        await XCTAssertThrowsErrorAsync(
-            try await client(config).callRaw(method: "accepted", identity: identity)
-        ) { error in
+        let configuredClient = client(config)
+        let submission = try await configuredClient.submitRaw(method: "accepted", identity: identity)
+        XCTAssertEqual(submission.requestID, lock.withLock { updateRequestID })
+        await XCTAssertThrowsErrorAsync(try await configuredClient.completeRaw(submission, identity: identity)) { error in
             XCTAssertEqual(error as? ICClientError, .requestDoneWithoutReply)
         }
     }
@@ -1154,7 +1356,10 @@ final class ICNativeClientTests: XCTestCase {
             ], key: root)
             return response(request, status: 200, body: readStateResponse(certificate))
         }
-        let reply = try await client(config).callRaw(method: "accepted-v2", identity: identity)
+        let configuredClient = client(config)
+        let submission = try await configuredClient.submitRaw(method: "accepted-v2", identity: identity)
+        XCTAssertEqual(submission.requestID, lock.withLock { updateRequestID })
+        let reply = try await configuredClient.completeRaw(submission, identity: identity)
         XCTAssertEqual(reply, Data("v2 reply".utf8))
 
         URLProtocolStub.handler = { request in
@@ -1169,6 +1374,363 @@ final class ICNativeClientTests: XCTestCase {
                 code: 3, message: "bad destination", errorCode: nil, isCertified: false
             )))
         }
+    }
+
+    func testSubmittedUpdateKeepsRequestIDAcrossCertifiedRejectAndPollTimeout() async throws {
+        let root = BLSTKey(seed: 35)
+        let config = try ICClientConfiguration(
+            canisterId: canisterText,
+            internetIdentityURL: URL(string: "https://id.ai/authorize")!,
+            derivationOrigin: "https://example.com",
+            trustRoot: .custom(root.derPublicKey),
+            network: ICNetworkConfiguration(pollingInterval: .milliseconds(1), maximumPollingAttempts: 1)
+        )
+        let identity = try makeAuthSession(config: config)
+        let lock = NSLock()
+        var requests = 0
+        URLProtocolStub.handler = { request in
+            let content = try requestContent(request)
+            let requestID = ICRequestID.hash(of: content)
+            let base = [Data("request_status".utf8), requestID]
+            let certificate = try self.makeCertificate(leaves: [
+                ([Data("time".utf8)], ICRequestID.leb128(self.nanoseconds(Date()))),
+                (base + [Data("status".utf8)], Data("rejected".utf8)),
+                (base + [Data("reject_code".utf8)], ICRequestID.leb128(4)),
+                (base + [Data("reject_message".utf8)], Data("certified reject".utf8)),
+            ], key: root)
+            lock.withLock { requests += 1 }
+            return response(request, status: 200, body: ICCBOR.encode(.map([
+                (.text("status"), .text("replied")),
+                (.text("certificate"), .bytes(certificate)),
+            ])))
+        }
+
+        let configuredClient = client(config)
+        let rejected = try await configuredClient.submitRaw(method: "certified-reject", identity: identity)
+        await XCTAssertThrowsErrorAsync(try await configuredClient.completeRaw(rejected, identity: identity)) { error in
+            XCTAssertEqual(error as? ICClientError, .rejected(ICReject(
+                code: 4,
+                message: "certified reject",
+                errorCode: nil,
+                isCertified: true
+            )))
+        }
+        XCTAssertEqual(lock.withLock { requests }, 1)
+
+        var submittedRequestID: Data?
+        URLProtocolStub.handler = { request in
+            if request.url?.path.hasSuffix("/call") == true {
+                let requestID = ICRequestID.hash(of: try requestContent(request))
+                lock.withLock { submittedRequestID = requestID }
+                return response(request, status: 202, body: Data())
+            }
+            let certificate = try self.makeCertificate(leaves: [
+                ([Data("time".utf8)], ICRequestID.leb128(self.nanoseconds(Date()))),
+            ], key: root)
+            return response(request, status: 200, body: readStateResponse(certificate))
+        }
+        let pending = try await configuredClient.submitRaw(method: "timeout", identity: identity)
+        XCTAssertEqual(pending.requestID, lock.withLock { submittedRequestID })
+        await XCTAssertThrowsErrorAsync(try await configuredClient.completeRaw(pending, identity: identity)) { error in
+            XCTAssertEqual(error as? ICClientError, .pollTimeout)
+        }
+        XCTAssertEqual(pending.requestID, lock.withLock { submittedRequestID })
+
+        let otherIdentity = try makeAuthSession(config: config)
+        await XCTAssertThrowsErrorAsync(try await configuredClient.completeRaw(pending, identity: otherIdentity)) { error in
+            guard case .invalidIdentity? = error as? ICClientError else {
+                return XCTFail("expected identity mismatch, received \(error)")
+            }
+        }
+    }
+
+    func testRequestOptionsAndSignedRequestsRoundTripWithoutChangingEnvelope() async throws {
+        let config = try configuration(root: BLSTKey(seed: 41).derPublicKey)
+        let identity = try makeAuthSession(config: config)
+        let expiry = Date().addingTimeInterval(120)
+        let nonce = Data((0..<32).map(UInt8.init))
+        let options = ICRequestOptions(ingressExpiry: expiry, nonce: nonce)
+        let configuredClient = client(config)
+
+        let update = try configuredClient.signUpdate(
+            method: "persisted_update",
+            arg: Data("argument".utf8),
+            identity: identity,
+            options: options
+        )
+        let decodedUpdate = try JSONDecoder().decode(
+            ICSignedUpdate.self,
+            from: JSONEncoder().encode(update)
+        )
+        XCTAssertEqual(decodedUpdate, update)
+        let updateEnvelope = try ICCBOR.decodeStrict(update.envelope)
+        let updateContent = try XCTUnwrap(ICCBOR.mapValue(updateEnvelope, key: "content"))
+        guard case .unsigned(let encodedExpiry) = ICCBOR.mapValue(updateContent, key: "ingress_expiry"),
+              case .bytes(let encodedNonce) = ICCBOR.mapValue(updateContent, key: "nonce") else {
+            return XCTFail("expected expiry and nonce in signed update")
+        }
+        XCTAssertEqual(update.requestID, ICRequestID.hash(of: updateContent))
+        XCTAssertEqual(encodedExpiry, nanoseconds(update.ingressExpiry))
+        XCTAssertEqual(encodedNonce, nonce)
+
+        let lock = NSLock()
+        var submittedContent: ICCBOR.Value?
+        URLProtocolStub.handler = { request in
+            let content = try requestContent(request)
+            lock.withLock { submittedContent = content }
+            return response(request, status: 202, body: Data())
+        }
+        let submission = try await configuredClient.submitSigned(decodedUpdate)
+        XCTAssertEqual(submission.requestID, update.requestID)
+        XCTAssertEqual(lock.withLock { submittedContent }, updateContent)
+
+        let query = try configuredClient.signQuery(
+            method: "persisted_query",
+            identity: identity,
+            options: options
+        )
+        let decodedQuery = try JSONDecoder().decode(
+            ICSignedQuery.self,
+            from: JSONEncoder().encode(query)
+        )
+        XCTAssertEqual(decodedQuery, query)
+        URLProtocolStub.handler = { request in
+            XCTAssertEqual(try requestContent(request), try XCTUnwrap(ICCBOR.mapValue(
+                try ICCBOR.decodeStrict(query.envelope), key: "content"
+            )))
+            return response(request, status: 200, body: queryResponse(arg: Data("reply".utf8), signatures: []))
+        }
+        let queryReply = try await configuredClient.unsafeQuerySigned(decodedQuery)
+        XCTAssertEqual(queryReply, Data("reply".utf8))
+    }
+
+    func testSignedRequestRejectsInvalidOptionsExpiryAndPersistedTampering() async throws {
+        let config = try configuration(root: BLSTKey(seed: 42).derPublicKey)
+        let identity = try makeAuthSession(config: config)
+        let configuredClient = client(config)
+
+        XCTAssertThrowsError(try configuredClient.signUpdate(
+            method: "expired",
+            identity: identity,
+            options: ICRequestOptions(ingressExpiry: Date().addingTimeInterval(-1))
+        ))
+        XCTAssertThrowsError(try configuredClient.signUpdate(
+            method: "too-far",
+            identity: identity,
+            options: ICRequestOptions(ingressExpiry: Date().addingTimeInterval(301))
+        ))
+        XCTAssertThrowsError(try configuredClient.signQuery(
+            method: "empty-nonce",
+            identity: identity,
+            options: ICRequestOptions(nonce: Data())
+        ))
+        XCTAssertThrowsError(try configuredClient.signQuery(
+            method: "large-nonce",
+            identity: identity,
+            options: ICRequestOptions(nonce: Data(count: 33))
+        ))
+        let shortSession = try ICAuthSession.delegating(
+            ed25519PrivateKey: Curve25519.Signing.PrivateKey().rawRepresentation,
+            configuration: config,
+            options: ICAuthenticationOptions(maxTimeToLiveNanoseconds: 60_000_000_000)
+        )
+        XCTAssertThrowsError(try configuredClient.signUpdate(
+            method: "past-delegation",
+            identity: shortSession,
+            options: ICRequestOptions(ingressExpiry: Date().addingTimeInterval(120))
+        ))
+
+        let valid = try configuredClient.signUpdate(
+            method: "valid",
+            identity: identity,
+            options: ICRequestOptions(ingressExpiry: Date().addingTimeInterval(60))
+        )
+        let tampered = ICSignedUpdate(
+            requestID: Data(count: 32),
+            canisterId: valid.canisterId,
+            effectiveCanisterId: valid.effectiveCanisterId,
+            method: valid.method,
+            ingressExpiry: valid.ingressExpiry,
+            envelope: valid.envelope
+        )
+        let lock = NSLock()
+        var requests = 0
+        URLProtocolStub.handler = { request in
+            lock.withLock { requests += 1 }
+            return response(request, status: 202, body: Data())
+        }
+        await XCTAssertThrowsErrorAsync(try await configuredClient.submitSigned(tampered))
+        XCTAssertEqual(lock.withLock { requests }, 0)
+    }
+
+    func testPersistedSignedUpdateRejectsEnvelopeSignatureAndMetadataTamperingBeforeTransport() async throws {
+        let config = try configuration(root: BLSTKey(seed: 45).derPublicKey)
+        let identity = try makeAuthSession(config: config)
+        let configuredClient = client(config)
+        let valid = try configuredClient.signUpdate(
+            method: "tamper",
+            arg: Data("original".utf8),
+            identity: identity,
+            options: ICRequestOptions(ingressExpiry: Date().addingTimeInterval(120))
+        )
+        let lock = NSLock()
+        var requests = 0
+        URLProtocolStub.handler = { request in
+            lock.withLock { requests += 1 }
+            return response(request, status: 202, body: Data())
+        }
+
+        let senderSignatureEnvelope = try replacingEnvelopeField(valid.envelope, key: "sender_sig") { value in
+            guard case .bytes(var signature) = value, !signature.isEmpty else {
+                throw ICClientError.invalidPayload
+            }
+            signature[0] ^= 1
+            return .bytes(signature)
+        }
+        await XCTAssertThrowsErrorAsync(try await configuredClient.submitSigned(ICSignedUpdate(
+            requestID: valid.requestID,
+            canisterId: valid.canisterId,
+            effectiveCanisterId: valid.effectiveCanisterId,
+            method: valid.method,
+            ingressExpiry: valid.ingressExpiry,
+            envelope: senderSignatureEnvelope
+        ))) { error in
+            guard case .invalidIdentity? = error as? ICClientError else {
+                return XCTFail("expected invalid sender signature, received \(error)")
+            }
+        }
+
+        let delegationSignatureEnvelope = try replacingEnvelopeField(valid.envelope, key: "sender_delegation") { value in
+            guard case .array(var delegations) = value,
+                  case .map(var fields) = delegations.first,
+                  let signatureIndex = fields.firstIndex(where: { $0.0 == .text("signature") }),
+                  case .bytes(var signature) = fields[signatureIndex].1,
+                  !signature.isEmpty else {
+                throw ICClientError.invalidPayload
+            }
+            signature[0] ^= 1
+            fields[signatureIndex].1 = .bytes(signature)
+            delegations[0] = .map(fields)
+            return .array(delegations)
+        }
+        await XCTAssertThrowsErrorAsync(try await configuredClient.submitSigned(ICSignedUpdate(
+            requestID: valid.requestID,
+            canisterId: valid.canisterId,
+            effectiveCanisterId: valid.effectiveCanisterId,
+            method: valid.method,
+            ingressExpiry: valid.ingressExpiry,
+            envelope: delegationSignatureEnvelope
+        ))) { error in
+            guard case .invalidIdentity? = error as? ICClientError else {
+                return XCTFail("expected invalid delegation signature, received \(error)")
+            }
+        }
+
+        let contentEnvelope = try replacingEnvelopeField(valid.envelope, key: "content") { content in
+            try replacingMapField(content, key: "arg", with: .bytes(Data("changed".utf8)))
+        }
+        let decodedContentEnvelope = try ICCBOR.decodeStrict(contentEnvelope)
+        let changedContent = try XCTUnwrap(ICCBOR.mapValue(decodedContentEnvelope, key: "content"))
+        await XCTAssertThrowsErrorAsync(try await configuredClient.submitSigned(ICSignedUpdate(
+            requestID: ICRequestID.hash(of: changedContent),
+            canisterId: valid.canisterId,
+            effectiveCanisterId: valid.effectiveCanisterId,
+            method: valid.method,
+            ingressExpiry: valid.ingressExpiry,
+            envelope: contentEnvelope
+        ))) { error in
+            guard case .invalidIdentity? = error as? ICClientError else {
+                return XCTFail("expected content signature mismatch, received \(error)")
+            }
+        }
+
+        await XCTAssertThrowsErrorAsync(try await configuredClient.submitSigned(ICSignedUpdate(
+            requestID: valid.requestID,
+            canisterId: valid.canisterId,
+            effectiveCanisterId: valid.effectiveCanisterId,
+            method: valid.method,
+            ingressExpiry: valid.ingressExpiry.addingTimeInterval(1),
+            envelope: valid.envelope
+        ))) { error in
+            guard case .invalidIdentity? = error as? ICClientError else {
+                return XCTFail("expected expiry metadata mismatch, received \(error)")
+            }
+        }
+        XCTAssertEqual(lock.withLock { requests }, 0)
+    }
+
+    func testPersistedSignedUpdateRejectsDelegationTargetAndPermissionExpansionBeforeTransport() async throws {
+        let config = try configuration(root: BLSTKey(seed: 46).derPublicKey)
+        let configuredClient = client(config)
+        let otherTarget = try XCTUnwrap(ICPrincipal.parse("aaaaa-aa"))
+        let targetMismatch = try signedUpdateForValidation(
+            config: config,
+            targets: [otherTarget],
+            permissions: .all
+        )
+        let queryOnly = try signedUpdateForValidation(
+            config: config,
+            targets: [try XCTUnwrap(ICPrincipal.parse(canisterText))],
+            permissions: .queries
+        )
+        let lock = NSLock()
+        var requests = 0
+        URLProtocolStub.handler = { request in
+            lock.withLock { requests += 1 }
+            return response(request, status: 202, body: Data())
+        }
+
+        await XCTAssertThrowsErrorAsync(try await configuredClient.submitSigned(targetMismatch)) { error in
+            XCTAssertEqual(
+                error as? ICClientError,
+                .invalidIdentity("Signed request exceeds its delegation targets.")
+            )
+        }
+        await XCTAssertThrowsErrorAsync(try await configuredClient.submitSigned(queryOnly)) { error in
+            XCTAssertEqual(
+                error as? ICClientError,
+                .invalidIdentity("Signed request exceeds its delegation permissions.")
+            )
+        }
+        XCTAssertEqual(lock.withLock { requests }, 0)
+    }
+
+    func testRequestStatusReturnsDistinctCertifiedStatesAndUsesRetainedResult() async throws {
+        let root = BLSTKey(seed: 43)
+        let config = try configuration(root: root.derPublicKey)
+        let identity = try makeAuthSession(config: config)
+        let requestID = Data(repeating: 0x43, count: 32)
+        let lock = NSLock()
+        var status = "received"
+        var requests = 0
+        URLProtocolStub.handler = { request in
+            lock.withLock { requests += 1 }
+            let base = [Data("request_status".utf8), requestID]
+            let certificate = try self.makeCertificate(leaves: [
+                ([Data("time".utf8)], ICRequestID.leb128(self.nanoseconds(Date()))),
+                (base + [Data("status".utf8)], Data(lock.withLock { status }.utf8)),
+            ], key: root)
+            return response(request, status: 200, body: readStateResponse(certificate))
+        }
+        let configuredClient = client(config)
+        let received = try await configuredClient.requestStatus(requestID: requestID, identity: identity)
+        XCTAssertEqual(received, .received)
+        lock.withLock { status = "processing" }
+        let processing = try await configuredClient.requestStatus(requestID: requestID, identity: identity)
+        XCTAssertEqual(processing, .processing)
+
+        let retained = ICUpdateSubmission(
+            requestID: requestID,
+            effectiveCanisterId: canisterText,
+            initialStatus: .replied(Data("cached".utf8)),
+            sender: ICPrincipal.selfAuthenticatingPublicKey(identity.delegation.publicKey)
+        )
+        let cached = try await configuredClient.requestStatus(for: retained, identity: identity)
+        XCTAssertEqual(cached, .replied(Data("cached".utf8)))
+        XCTAssertEqual(lock.withLock { requests }, 2)
+        await XCTAssertThrowsErrorAsync(
+            try await configuredClient.requestStatus(requestID: Data(count: 31), identity: identity)
+        )
     }
 
     func testResponseLimitStopsBeforeBodyAcceptance() async throws {
@@ -1456,6 +2018,89 @@ final class ICNativeClientTests: XCTestCase {
         XCTAssertThrowsError(try parseICRC(try icrcCallback(pending: leaf, leafKey: other), pending: leaf, config: config))
         let target = icrcPending()
         XCTAssertThrowsError(try parseICRC(try icrcCallback(pending: target, targets: ["2vxsx-fae"]), pending: target, config: config))
+    }
+
+    private func replacingEnvelopeField(
+        _ envelope: Data,
+        key: String,
+        transform: (ICCBOR.Value) throws -> ICCBOR.Value
+    ) throws -> Data {
+        let decoded = try ICCBOR.decodeStrict(envelope)
+        guard case .tagged(let tag, .map(var fields)) = decoded,
+              let index = fields.firstIndex(where: { $0.0 == .text(key) }) else {
+            throw ICClientError.invalidPayload
+        }
+        fields[index].1 = try transform(fields[index].1)
+        return ICCBOR.encode(.tagged(tag, .map(fields)))
+    }
+
+    private func replacingMapField(
+        _ value: ICCBOR.Value,
+        key: String,
+        with replacement: ICCBOR.Value
+    ) throws -> ICCBOR.Value {
+        guard case .map(var fields) = value,
+              let index = fields.firstIndex(where: { $0.0 == .text(key) }) else {
+            throw ICClientError.invalidPayload
+        }
+        fields[index].1 = replacement
+        return .map(fields)
+    }
+
+    private func signedUpdateForValidation(
+        config: ICClientConfiguration,
+        targets: [Data]?,
+        permissions: ICDelegationPermission?
+    ) throws -> ICSignedUpdate {
+        let root = Curve25519.Signing.PrivateKey()
+        let sessionKey = Curve25519.Signing.PrivateKey()
+        let rootDER = ICRC167Codec.derPublicKey(from: root.publicKey.rawRepresentation)
+        let sessionDER = ICRC167Codec.derPublicKey(from: sessionKey.publicKey.rawRepresentation)
+        let requestedAt = Date()
+        let delegationExpiration = nanoseconds(requestedAt.addingTimeInterval(180))
+        let ingressExpiration = nanoseconds(requestedAt.addingTimeInterval(60))
+        let delegation = ICDelegationChain.SignedDelegation.Delegation(
+            publicKey: sessionDER,
+            expiration: delegationExpiration,
+            targets: targets,
+            permissions: permissions
+        )
+        let chain = ICDelegationChain(
+            publicKey: rootDER,
+            delegations: [.init(
+                delegation: delegation,
+                signature: try root.signature(for: delegationSignable(delegation))
+            )]
+        )
+        let session = ICAuthSession(storage: ICStoredAuthSession(
+            formatVersion: ICAuthSession.currentFormatVersion,
+            principal: ICPrincipal.text(from: ICPrincipal.selfAuthenticatingPublicKey(rootDER)),
+            canisterId: config.canisterId,
+            internetIdentityURL: config.internetIdentityURL.absoluteString,
+            derivationOrigin: config.derivationOrigin,
+            sessionPublicKey: sessionDER,
+            sessionPrivateKey: sessionKey.rawRepresentation,
+            delegation: chain,
+            requestedAt: requestedAt,
+            maxTimeToLiveNanoseconds: config.delegationTTLNanoseconds
+        ))
+        let canister = try XCTUnwrap(ICPrincipal.parse(config.canisterId))
+        let content: ICCBOR.Value = .map([
+            (.text("request_type"), .text("call")),
+            (.text("canister_id"), .bytes(canister)),
+            (.text("method_name"), .text("scope-check")),
+            (.text("arg"), .bytes(Data())),
+            (.text("sender"), .bytes(ICPrincipal.selfAuthenticatingPublicKey(rootDER))),
+            (.text("ingress_expiry"), .unsigned(ingressExpiration)),
+        ])
+        return ICSignedUpdate(
+            requestID: ICRequestID.hash(of: content),
+            canisterId: config.canisterId,
+            effectiveCanisterId: config.canisterId,
+            method: "scope-check",
+            ingressExpiry: Date(timeIntervalSince1970: Double(ingressExpiration) / 1_000_000_000),
+            envelope: try ICClient.signedEnvelope(content: content, identity: session)
+        )
     }
 
     // MARK: Helpers

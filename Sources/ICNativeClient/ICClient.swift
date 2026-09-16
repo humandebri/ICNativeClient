@@ -1,6 +1,102 @@
 import CryptoKit
 import Foundation
 
+public enum ICRequestStatus: Equatable, Sendable {
+    case absent
+    case received
+    case processing
+    case replied(Data)
+    case rejected(ICReject)
+    case done
+}
+
+public struct ICRequestOptions: Equatable, Sendable {
+    public static let maximumNonceBytes = 32
+    public static let maximumIngressTTL: TimeInterval = 300
+    public static let `default` = ICRequestOptions()
+
+    public let ingressExpiry: Date?
+    public let nonce: Data?
+
+    public init(ingressExpiry: Date? = nil, nonce: Data? = nil) {
+        self.ingressExpiry = ingressExpiry
+        self.nonce = nonce
+    }
+}
+
+public struct ICSignedQuery: Codable, Equatable, Sendable {
+    public let requestID: Data
+    public let canisterId: String
+    public let effectiveCanisterId: String
+    public let delegationTargetCanisterId: String
+    public let method: String
+    public let ingressExpiry: Date
+    public let envelope: Data
+
+    init(
+        requestID: Data,
+        canisterId: String,
+        effectiveCanisterId: String,
+        delegationTargetCanisterId: String,
+        method: String,
+        ingressExpiry: Date,
+        envelope: Data
+    ) {
+        self.requestID = requestID
+        self.canisterId = canisterId
+        self.effectiveCanisterId = effectiveCanisterId
+        self.delegationTargetCanisterId = delegationTargetCanisterId
+        self.method = method
+        self.ingressExpiry = ingressExpiry
+        self.envelope = envelope
+    }
+}
+
+public struct ICSignedUpdate: Codable, Equatable, Sendable {
+    public let requestID: Data
+    public let canisterId: String
+    public let effectiveCanisterId: String
+    public let method: String
+    public let ingressExpiry: Date
+    public let envelope: Data
+
+    init(
+        requestID: Data,
+        canisterId: String,
+        effectiveCanisterId: String,
+        method: String,
+        ingressExpiry: Date,
+        envelope: Data
+    ) {
+        self.requestID = requestID
+        self.canisterId = canisterId
+        self.effectiveCanisterId = effectiveCanisterId
+        self.method = method
+        self.ingressExpiry = ingressExpiry
+        self.envelope = envelope
+    }
+}
+
+public struct ICUpdateSubmission: Equatable, Sendable {
+    public let requestID: Data
+    public let effectiveCanisterId: String
+
+    let initialStatus: ICCertificateStatus
+    let sender: Data
+
+    init(
+        requestID: Data,
+        effectiveCanisterId: String,
+        initialStatus: ICCertificateStatus,
+        sender: Data
+    ) {
+        self.requestID = requestID
+        self.effectiveCanisterId = effectiveCanisterId
+        self.initialStatus = initialStatus
+        self.sender = sender
+    }
+}
+
 public final class ICClient: @unchecked Sendable {
     private let session: URLSession
     private let sleep: @Sendable (Duration) async throws -> Void
@@ -40,6 +136,38 @@ public final class ICClient: @unchecked Sendable {
         delegationTargetCanisterId: String? = nil,
         identity: ICAuthSession? = nil
     ) async throws -> Data {
+        try await queryRaw(
+            method: method,
+            arg: arg,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            delegationTargetCanisterId: delegationTargetCanisterId,
+            identity: identity,
+            options: .default
+        )
+    }
+
+    /// Performs a query with per-request expiry and nonce options.
+    public func queryRaw(
+        method: String,
+        arg: Data = Data(),
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        delegationTargetCanisterId: String? = nil,
+        identity: ICAuthSession? = nil,
+        options: ICRequestOptions
+    ) async throws -> Data {
+        if let identity {
+            return try await querySigned(signQuery(
+                method: method,
+                arg: arg,
+                canisterId: canisterId,
+                effectiveCanisterId: effectiveCanisterId,
+                delegationTargetCanisterId: delegationTargetCanisterId,
+                identity: identity,
+                options: options
+            ))
+        }
         let requestText = canisterId ?? configuration.canisterId
         let effectiveText = effectiveCanisterId ?? requestText
         // Delegation targets constrain the signed content canister, while certificate ranges constrain routing.
@@ -49,7 +177,8 @@ public final class ICClient: @unchecked Sendable {
             requestCanisterId: requestText,
             effectiveCanisterId: effectiveText,
             delegationTargetCanisterId: delegationTargetCanisterId ?? requestText,
-            identity: identity
+            identity: nil,
+            options: options
         )
         var subnet = try await verifiedSubnet(for: effectiveText, forceRefresh: false)
         do {
@@ -70,6 +199,38 @@ public final class ICClient: @unchecked Sendable {
         delegationTargetCanisterId: String? = nil,
         identity: ICAuthSession? = nil
     ) async throws -> Data {
+        try await unsafeQueryRaw(
+            method: method,
+            arg: arg,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            delegationTargetCanisterId: delegationTargetCanisterId,
+            identity: identity,
+            options: .default
+        )
+    }
+
+    /// Explicit opt-out with per-request expiry and nonce options.
+    public func unsafeQueryRaw(
+        method: String,
+        arg: Data = Data(),
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        delegationTargetCanisterId: String? = nil,
+        identity: ICAuthSession? = nil,
+        options: ICRequestOptions
+    ) async throws -> Data {
+        if let identity {
+            return try await unsafeQuerySigned(signQuery(
+                method: method,
+                arg: arg,
+                canisterId: canisterId,
+                effectiveCanisterId: effectiveCanisterId,
+                delegationTargetCanisterId: delegationTargetCanisterId,
+                identity: identity,
+                options: options
+            ))
+        }
         let requestText = canisterId ?? configuration.canisterId
         let effectiveText = effectiveCanisterId ?? requestText
         let (response, _) = try await performQuery(
@@ -78,7 +239,8 @@ public final class ICClient: @unchecked Sendable {
             requestCanisterId: requestText,
             effectiveCanisterId: effectiveText,
             delegationTargetCanisterId: delegationTargetCanisterId ?? requestText,
-            identity: identity
+            identity: nil,
+            options: options
         )
         return try response.result()
     }
@@ -92,6 +254,27 @@ public final class ICClient: @unchecked Sendable {
         delegationTargetCanisterId: String? = nil,
         identity: ICAuthSession? = nil
     ) async throws -> CandidReply {
+        try await queryCandid(
+            method: method,
+            arguments: arguments,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            delegationTargetCanisterId: delegationTargetCanisterId,
+            identity: identity,
+            options: .default
+        )
+    }
+
+    /// Performs a verified Candid query with per-request options.
+    public func queryCandid(
+        method: String,
+        arguments: CandidArguments = CandidArguments(),
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        delegationTargetCanisterId: String? = nil,
+        identity: ICAuthSession? = nil,
+        options: ICRequestOptions
+    ) async throws -> CandidReply {
         let bytes = try arguments.encode()
         let reply = try await queryRaw(
             method: method,
@@ -99,7 +282,8 @@ public final class ICClient: @unchecked Sendable {
             canisterId: canisterId,
             effectiveCanisterId: effectiveCanisterId,
             delegationTargetCanisterId: delegationTargetCanisterId,
-            identity: identity
+            identity: identity,
+            options: options
         )
         return try CandidDecoder().decode(reply)
     }
@@ -113,13 +297,36 @@ public final class ICClient: @unchecked Sendable {
         identity: ICAuthSession? = nil,
         as outputType: Output.Type = Output.self
     ) async throws -> Output {
+        try await query(
+            method: method,
+            arguments: arguments,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            delegationTargetCanisterId: delegationTargetCanisterId,
+            identity: identity,
+            options: .default,
+            as: outputType
+        )
+    }
+
+    public func query<Output: CandidConvertible>(
+        method: String,
+        arguments: CandidArguments = CandidArguments(),
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        delegationTargetCanisterId: String? = nil,
+        identity: ICAuthSession? = nil,
+        options: ICRequestOptions,
+        as outputType: Output.Type = Output.self
+    ) async throws -> Output {
         let reply = try await queryCandid(
             method: method,
             arguments: arguments,
             canisterId: canisterId,
             effectiveCanisterId: effectiveCanisterId,
             delegationTargetCanisterId: delegationTargetCanisterId,
-            identity: identity
+            identity: identity,
+            options: options
         )
         return try reply.decode(outputType)
     }
@@ -135,13 +342,99 @@ public final class ICClient: @unchecked Sendable {
     ) async throws -> Output {
         try await query(
             method: method,
+            argument: argument,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            delegationTargetCanisterId: delegationTargetCanisterId,
+            identity: identity,
+            options: .default,
+            as: outputType
+        )
+    }
+
+    public func query<Input: CandidConvertible, Output: CandidConvertible>(
+        method: String,
+        argument: Input,
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        delegationTargetCanisterId: String? = nil,
+        identity: ICAuthSession? = nil,
+        options: ICRequestOptions,
+        as outputType: Output.Type = Output.self
+    ) async throws -> Output {
+        try await query(
+            method: method,
             arguments: CandidArguments(argument),
             canisterId: canisterId,
             effectiveCanisterId: effectiveCanisterId,
             delegationTargetCanisterId: delegationTargetCanisterId,
             identity: identity,
+            options: options,
             as: outputType
         )
+    }
+
+    /// Creates a reusable, fully signed query envelope without sending it.
+    public func signQuery(
+        method: String,
+        arg: Data = Data(),
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        delegationTargetCanisterId: String? = nil,
+        identity: ICAuthSession,
+        options: ICRequestOptions = .default
+    ) throws -> ICSignedQuery {
+        let requestText = canisterId ?? configuration.canisterId
+        let effectiveText = effectiveCanisterId ?? requestText
+        let delegationTargetText = delegationTargetCanisterId ?? requestText
+        guard let canister = ICPrincipal.parse(requestText),
+              ICPrincipal.parse(effectiveText) != nil,
+              !method.isEmpty else {
+            throw ICClientError.invalidCanisterId
+        }
+        try validateIdentityForRequest(
+            identity,
+            requestCanisterId: delegationTargetText,
+            permission: .query
+        )
+        let (expiry, expiryNanoseconds) = try resolvedIngressExpiry(options, identity: identity)
+        let content = requestContent(
+            type: "query",
+            canister: canister,
+            method: method,
+            arg: arg,
+            identity: identity,
+            ingressExpiry: expiryNanoseconds,
+            nonce: options.nonce
+        )
+        return ICSignedQuery(
+            requestID: ICRequestID.hash(of: content),
+            canisterId: requestText,
+            effectiveCanisterId: effectiveText,
+            delegationTargetCanisterId: delegationTargetText,
+            method: method,
+            ingressExpiry: expiry,
+            envelope: try Self.signedEnvelope(content: content, identity: identity)
+        )
+    }
+
+    /// Sends a stored signed query and verifies its node signatures.
+    public func querySigned(_ request: ICSignedQuery) async throws -> Data {
+        let response = try await performSignedQuery(request)
+        var subnet = try await verifiedSubnet(for: request.effectiveCanisterId, forceRefresh: false)
+        do {
+            try verify(response: response, requestID: request.requestID, subnet: subnet)
+        } catch {
+            subnet = try await verifiedSubnet(for: request.effectiveCanisterId, forceRefresh: true)
+            try verify(response: response, requestID: request.requestID, subnet: subnet)
+        }
+        return try response.result()
+    }
+
+    /// Explicitly sends a stored signed query without authenticating its response.
+    public func unsafeQuerySigned(_ request: ICSignedQuery) async throws -> Data {
+        let response = try await performSignedQuery(request)
+        return try response.result()
     }
 
     public func callRaw(
@@ -151,35 +444,136 @@ public final class ICClient: @unchecked Sendable {
         effectiveCanisterId: String? = nil,
         identity: ICAuthSession
     ) async throws -> Data {
+        try await callRaw(
+            method: method,
+            arg: arg,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            identity: identity,
+            options: .default
+        )
+    }
+
+    public func callRaw(
+        method: String,
+        arg: Data = Data(),
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        identity: ICAuthSession,
+        options: ICRequestOptions
+    ) async throws -> Data {
+        let submission = try await submitRaw(
+            method: method,
+            arg: arg,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            identity: identity,
+            options: options
+        )
+        return try await completeRaw(submission, identity: identity)
+    }
+
+    /// Submits an update and returns its ingress request ID before polling for completion.
+    public func submitRaw(
+        method: String,
+        arg: Data = Data(),
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        identity: ICAuthSession,
+        options: ICRequestOptions = .default
+    ) async throws -> ICUpdateSubmission {
+        try await submitSigned(signUpdate(
+            method: method,
+            arg: arg,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            identity: identity,
+            options: options
+        ))
+    }
+
+    /// Creates a reusable, fully signed update envelope without sending it.
+    public func signUpdate(
+        method: String,
+        arg: Data = Data(),
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        identity: ICAuthSession,
+        options: ICRequestOptions = .default
+    ) throws -> ICSignedUpdate {
         let targetText = canisterId ?? configuration.canisterId
         let effectiveText = effectiveCanisterId ?? targetText
-        guard let target = ICPrincipal.parse(targetText), let effective = ICPrincipal.parse(effectiveText) else {
+        guard let target = ICPrincipal.parse(targetText),
+              ICPrincipal.parse(effectiveText) != nil,
+              !method.isEmpty else {
             throw ICClientError.invalidCanisterId
         }
-        // Delegation targets constrain the content canister, while certificate ranges constrain routing.
         try validateIdentityForRequest(identity, requestCanisterId: targetText, permission: .call)
-        let content = requestContent(type: "call", canister: target, method: method, arg: arg, identity: identity)
+        let (expiry, expiryNanoseconds) = try resolvedIngressExpiry(options, identity: identity)
+        let content = requestContent(
+            type: "call",
+            canister: target,
+            method: method,
+            arg: arg,
+            identity: identity,
+            ingressExpiry: expiryNanoseconds,
+            nonce: options.nonce
+        )
         let requestID = ICRequestID.hash(of: content)
         let envelope = try Self.signedEnvelope(content: content, identity: identity)
+        return ICSignedUpdate(
+            requestID: requestID,
+            canisterId: targetText,
+            effectiveCanisterId: effectiveText,
+            method: method,
+            ingressExpiry: expiry,
+            envelope: envelope
+        )
+    }
+
+    /// Sends a stored signed update and returns before polling for completion.
+    public func submitSigned(_ request: ICSignedUpdate) async throws -> ICUpdateSubmission {
+        let content = try validateSignedRequest(
+            envelope: request.envelope,
+            requestID: request.requestID,
+            canisterId: request.canisterId,
+            effectiveCanisterId: request.effectiveCanisterId,
+            method: request.method,
+            ingressExpiry: request.ingressExpiry,
+            expectedType: "call",
+            authorizationCanisterId: request.canisterId
+        )
+        guard case .bytes(let sender) = try ICCBOR.requiredValue(
+            try ICCBOR.requiredMap(content, context: "signed update content"),
+            key: "sender",
+            context: "signed update content"
+        ), let effective = ICPrincipal.parse(request.effectiveCanisterId) else {
+            throw ICClientError.invalidIdentity("Signed update metadata does not match its envelope.")
+        }
         let (data, response) = try await postCBOR(
-            envelope,
-            to: apiURL(for: "call", canisterId: effectiveText, version: .v4),
-            operation: "update \(method)"
+            request.envelope,
+            to: apiURL(for: "call", canisterId: request.effectiveCanisterId, version: .v4),
+            operation: "update \(request.method)"
         )
         if response.statusCode == 404 {
-            return try await callRawV2(
-                envelope: envelope,
-                requestID: requestID,
-                method: method,
-                effectiveText: effectiveText,
-                identity: identity
+            return try await submitRawV2(
+                envelope: request.envelope,
+                requestID: request.requestID,
+                method: request.method,
+                effectiveText: request.effectiveCanisterId,
+                sender: sender
             )
         }
         guard response.statusCode == 200 || response.statusCode == 202 else {
-            throw ICClientError.backendUnavailable(Self.httpFailureContext("update \(method)", data: data, response: response))
+            throw ICClientError.backendUnavailable(Self.httpFailureContext("update \(request.method)", data: data, response: response))
         }
         if response.statusCode == 202 || data.isEmpty {
-            return try await poll(requestId: requestID, canisterId: effectiveText, identity: identity)
+            return updateSubmission(
+                requestID: request.requestID,
+                effectiveCanisterId: request.effectiveCanisterId,
+                status: .pending,
+                sender: sender
+            )
         }
         let fields = try ICCBOR.requiredMap(ICCBOR.decodeStrict(data), context: "v4 call response")
         guard case .text(let status) = try ICCBOR.requiredValue(fields, key: "status", context: "v4 call response") else {
@@ -195,12 +589,31 @@ public final class ICClient: @unchecked Sendable {
                 effectiveCanisterID: effective,
                 trustRoot: configuration.trustRoot
             )
-            return try await resolve(status: ICCertificateVerifier.status(in: certificate, requestID: requestID), requestID: requestID, effectiveText: effectiveText, identity: identity)
+            return updateSubmission(
+                requestID: request.requestID,
+                effectiveCanisterId: request.effectiveCanisterId,
+                status: try ICCertificateVerifier.status(in: certificate, requestID: request.requestID),
+                sender: sender
+            )
         case "non_replicated_rejection":
             throw ICClientError.rejected(try parseReject(fields, context: "v4 rejection"))
         default:
             throw ICClientError.invalidResponse("unsupported v4 call status \(status)")
         }
+    }
+
+    /// Resolves a previously submitted update, polling only when its initial response was pending.
+    public func completeRaw(
+        _ submission: ICUpdateSubmission,
+        identity: ICAuthSession
+    ) async throws -> Data {
+        try validateSubmissionIdentity(submission, identity: identity)
+        return try await resolve(
+            status: submission.initialStatus,
+            requestID: submission.requestID,
+            effectiveText: submission.effectiveCanisterId,
+            identity: identity
+        )
     }
 
     /// Performs an update with Candid arguments using the same verified path as `callRaw`.
@@ -211,14 +624,62 @@ public final class ICClient: @unchecked Sendable {
         effectiveCanisterId: String? = nil,
         identity: ICAuthSession
     ) async throws -> CandidReply {
+        try await callCandid(
+            method: method,
+            arguments: arguments,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            identity: identity,
+            options: .default
+        )
+    }
+
+    /// Performs a Candid update with per-request options.
+    public func callCandid(
+        method: String,
+        arguments: CandidArguments = CandidArguments(),
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        identity: ICAuthSession,
+        options: ICRequestOptions
+    ) async throws -> CandidReply {
         let bytes = try arguments.encode()
         let reply = try await callRaw(
             method: method,
             arg: bytes,
             canisterId: canisterId,
             effectiveCanisterId: effectiveCanisterId,
-            identity: identity
+            identity: identity,
+            options: options
         )
+        return try CandidDecoder().decode(reply)
+    }
+
+    /// Encodes and submits a Candid update without waiting for its final reply.
+    public func submitCandid(
+        method: String,
+        arguments: CandidArguments = CandidArguments(),
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        identity: ICAuthSession,
+        options: ICRequestOptions = .default
+    ) async throws -> ICUpdateSubmission {
+        try await submitRaw(
+            method: method,
+            arg: arguments.encode(),
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            identity: identity,
+            options: options
+        )
+    }
+
+    /// Resolves and decodes a previously submitted Candid update.
+    public func completeCandid(
+        _ submission: ICUpdateSubmission,
+        identity: ICAuthSession
+    ) async throws -> CandidReply {
+        let reply = try await completeRaw(submission, identity: identity)
         return try CandidDecoder().decode(reply)
     }
 
@@ -230,12 +691,33 @@ public final class ICClient: @unchecked Sendable {
         identity: ICAuthSession,
         as outputType: Output.Type = Output.self
     ) async throws -> Output {
+        try await call(
+            method: method,
+            arguments: arguments,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            identity: identity,
+            options: .default,
+            as: outputType
+        )
+    }
+
+    public func call<Output: CandidConvertible>(
+        method: String,
+        arguments: CandidArguments = CandidArguments(),
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        identity: ICAuthSession,
+        options: ICRequestOptions,
+        as outputType: Output.Type = Output.self
+    ) async throws -> Output {
         let reply = try await callCandid(
             method: method,
             arguments: arguments,
             canisterId: canisterId,
             effectiveCanisterId: effectiveCanisterId,
-            identity: identity
+            identity: identity,
+            options: options
         )
         return try reply.decode(outputType)
     }
@@ -250,11 +732,82 @@ public final class ICClient: @unchecked Sendable {
     ) async throws -> Output {
         try await call(
             method: method,
+            argument: argument,
+            canisterId: canisterId,
+            effectiveCanisterId: effectiveCanisterId,
+            identity: identity,
+            options: .default,
+            as: outputType
+        )
+    }
+
+    public func call<Input: CandidConvertible, Output: CandidConvertible>(
+        method: String,
+        argument: Input,
+        canisterId: String? = nil,
+        effectiveCanisterId: String? = nil,
+        identity: ICAuthSession,
+        options: ICRequestOptions,
+        as outputType: Output.Type = Output.self
+    ) async throws -> Output {
+        try await call(
+            method: method,
             arguments: CandidArguments(argument),
             canisterId: canisterId,
             effectiveCanisterId: effectiveCanisterId,
             identity: identity,
+            options: options,
             as: outputType
+        )
+    }
+
+    /// Reads one certified status for an ingress request without waiting or retrying.
+    public func requestStatus(
+        requestID: Data,
+        effectiveCanisterId: String? = nil,
+        identity: ICAuthSession
+    ) async throws -> ICRequestStatus {
+        let effectiveText = effectiveCanisterId ?? configuration.canisterId
+        guard requestID.count == 32, let effective = ICPrincipal.parse(effectiveText) else {
+            throw ICClientError.invalidConfiguration("Request status requires a 32-byte request ID and valid effective canister ID.")
+        }
+        try validateIdentityForRequest(identity, requestCanisterId: effectiveText, permission: .readState)
+        let (_, expiryNanoseconds) = try resolvedIngressExpiry(.default, identity: identity)
+        let content = readStateContent(
+            paths: [[Data("request_status".utf8), requestID]],
+            identity: identity,
+            ingressExpiry: expiryNanoseconds
+        )
+        let envelope = try Self.signedEnvelope(content: content, identity: identity)
+        let (data, response) = try await postCBOR(
+            envelope,
+            to: apiURL(for: "read_state", canisterId: effectiveText),
+            operation: "read_state"
+        )
+        guard response.statusCode == 200 else {
+            throw ICClientError.backendUnavailable(Self.httpFailureContext("read_state", data: data, response: response))
+        }
+        let certificate = try ICCertificateVerifier.verify(
+            certificateData: decodeReadStateCertificate(data),
+            effectiveCanisterID: effective,
+            trustRoot: configuration.trustRoot
+        )
+        return Self.publicStatus(try ICCertificateVerifier.status(in: certificate, requestID: requestID))
+    }
+
+    /// Returns a submission's retained certified result, or performs one status request when it was accepted as pending.
+    public func requestStatus(
+        for submission: ICUpdateSubmission,
+        identity: ICAuthSession
+    ) async throws -> ICRequestStatus {
+        try validateSubmissionIdentity(submission, identity: identity)
+        if submission.initialStatus != .pending {
+            return Self.publicStatus(submission.initialStatus)
+        }
+        return try await requestStatus(
+            requestID: submission.requestID,
+            effectiveCanisterId: submission.effectiveCanisterId,
+            identity: identity
         )
     }
 
@@ -266,33 +819,16 @@ public final class ICClient: @unchecked Sendable {
     ) async throws -> Data {
         let effectiveText = canisterId ?? configuration.canisterId
         let maximumAttempts = attempts ?? configuration.network.maximumPollingAttempts
-        guard requestId.count == 32, let effective = ICPrincipal.parse(effectiveText), maximumAttempts > 0 else {
+        guard requestId.count == 32, ICPrincipal.parse(effectiveText) != nil, maximumAttempts > 0 else {
             throw ICClientError.invalidConfiguration("Poll requires a 32-byte request ID and at least one attempt.")
         }
-        try validateIdentityForRequest(identity, requestCanisterId: effectiveText, permission: .readState)
-        let url = try apiURL(for: "read_state", canisterId: effectiveText)
         for _ in 0..<maximumAttempts {
             try await sleep(configuration.network.pollingInterval)
-            let content = readStateContent(
-                paths: [[Data("request_status".utf8), requestId]],
-                identity: identity
-            )
-            let envelope = try Self.signedEnvelope(content: content, identity: identity)
-            let (data, response) = try await postCBOR(envelope, to: url, operation: "read_state")
-            guard response.statusCode == 200 else {
-                throw ICClientError.backendUnavailable(Self.httpFailureContext("read_state", data: data, response: response))
-            }
-            let certificateData = try decodeReadStateCertificate(data)
-            let certificate = try ICCertificateVerifier.verify(
-                certificateData: certificateData,
-                effectiveCanisterID: effective,
-                trustRoot: configuration.trustRoot
-            )
-            switch try ICCertificateVerifier.status(in: certificate, requestID: requestId) {
+            switch try await requestStatus(requestID: requestId, effectiveCanisterId: effectiveText, identity: identity) {
             case .replied(let reply): return reply
             case .rejected(let reject): throw ICClientError.rejected(reject)
             case .done: throw ICClientError.requestDoneWithoutReply
-            case .absent, .pending: continue
+            case .absent, .received, .processing: continue
             }
         }
         throw ICClientError.pollTimeout
@@ -319,6 +855,51 @@ public final class ICClient: @unchecked Sendable {
         }
     }
 
+    private func validateSubmissionIdentity(_ submission: ICUpdateSubmission, identity: ICAuthSession) throws {
+        let sender = ICPrincipal.selfAuthenticatingPublicKey(identity.delegation.publicKey)
+        guard sender == submission.sender else {
+            throw ICClientError.invalidIdentity("Update submission belongs to a different identity.")
+        }
+    }
+
+    private static func publicStatus(_ status: ICCertificateStatus) -> ICRequestStatus {
+        switch status {
+        case .absent, .pending: return .absent
+        case .received: return .received
+        case .processing: return .processing
+        case .replied(let data): return .replied(data)
+        case .rejected(let reject): return .rejected(reject)
+        case .done: return .done
+        }
+    }
+
+    private func resolvedIngressExpiry(
+        _ options: ICRequestOptions,
+        identity: ICAuthSession?
+    ) throws -> (Date, UInt64) {
+        if let nonce = options.nonce,
+           nonce.isEmpty || nonce.count > ICRequestOptions.maximumNonceBytes {
+            throw ICClientError.invalidConfiguration("Request nonce must contain between 1 and 32 bytes.")
+        }
+        let now = Date()
+        let expiry = options.ingressExpiry ?? now.addingTimeInterval(ICRequestOptions.maximumIngressTTL)
+        let interval = expiry.timeIntervalSince1970
+        guard interval.isFinite, expiry > now,
+              expiry.timeIntervalSince(now) <= ICRequestOptions.maximumIngressTTL else {
+            throw ICClientError.invalidConfiguration("Ingress expiry must be in the future and no more than 5 minutes away.")
+        }
+        let scaled = interval * 1_000_000_000
+        guard scaled >= 0, scaled < Double(UInt64.max) else {
+            throw ICClientError.invalidConfiguration("Ingress expiry is outside the supported range.")
+        }
+        let nanoseconds = UInt64(scaled)
+        if let parentExpiry = identity?.delegation.delegations.map(\.delegation.expiration).min(),
+           nanoseconds > parentExpiry {
+            throw ICClientError.invalidIdentity("Ingress expiry exceeds the session delegation expiration.")
+        }
+        return (Date(timeIntervalSince1970: Double(nanoseconds) / 1_000_000_000), nanoseconds)
+    }
+
     public static func signedEnvelope(content: ICCBOR.Value, identity: ICAuthSession) throws -> Data {
         let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: identity.sessionPrivateKey)
         let challenge = Data([0x0a]) + Data("ic-request".utf8) + ICRequestID.hash(of: content)
@@ -337,7 +918,8 @@ public final class ICClient: @unchecked Sendable {
         requestCanisterId: String,
         effectiveCanisterId: String,
         delegationTargetCanisterId: String,
-        identity: ICAuthSession?
+        identity: ICAuthSession?,
+        options: ICRequestOptions
     ) async throws -> (ICQueryResponse, Data) {
         guard let canister = ICPrincipal.parse(requestCanisterId),
               ICPrincipal.parse(effectiveCanisterId) != nil,
@@ -345,11 +927,18 @@ public final class ICClient: @unchecked Sendable {
             throw ICClientError.invalidCanisterId
         }
         let content: ICCBOR.Value
+        let (_, expiryNanoseconds) = try resolvedIngressExpiry(options, identity: identity)
         if let identity {
             try validateIdentityForRequest(identity, requestCanisterId: delegationTargetCanisterId, permission: .query)
-            content = requestContent(type: "query", canister: canister, method: method, arg: arg, identity: identity)
+            content = requestContent(
+                type: "query", canister: canister, method: method, arg: arg, identity: identity,
+                ingressExpiry: expiryNanoseconds, nonce: options.nonce
+            )
         } else {
-            content = anonymousRequestContent(type: "query", canister: canister, method: method, arg: arg)
+            content = anonymousRequestContent(
+                type: "query", canister: canister, method: method, arg: arg,
+                ingressExpiry: expiryNanoseconds, nonce: options.nonce
+            )
         }
         let envelope = try envelope(content: content, identity: identity)
         let (data, response) = try await postCBOR(
@@ -361,6 +950,138 @@ public final class ICClient: @unchecked Sendable {
             throw ICClientError.backendUnavailable(Self.httpFailureContext("query \(method)", data: data, response: response))
         }
         return (try ICQueryResponse(cbor: data), ICRequestID.hash(of: content))
+    }
+
+    private func performSignedQuery(_ request: ICSignedQuery) async throws -> ICQueryResponse {
+        _ = try validateSignedRequest(
+            envelope: request.envelope,
+            requestID: request.requestID,
+            canisterId: request.canisterId,
+            effectiveCanisterId: request.effectiveCanisterId,
+            method: request.method,
+            ingressExpiry: request.ingressExpiry,
+            expectedType: "query",
+            authorizationCanisterId: request.delegationTargetCanisterId
+        )
+        let (data, response) = try await postCBOR(
+            request.envelope,
+            to: apiURL(for: "query", canisterId: request.effectiveCanisterId),
+            operation: "query \(request.method)"
+        )
+        guard response.statusCode == 200 else {
+            throw ICClientError.backendUnavailable(Self.httpFailureContext("query \(request.method)", data: data, response: response))
+        }
+        return try ICQueryResponse(cbor: data)
+    }
+
+    private func validateSignedRequest(
+        envelope: Data,
+        requestID: Data,
+        canisterId: String,
+        effectiveCanisterId: String,
+        method: String,
+        ingressExpiry: Date,
+        expectedType: String,
+        authorizationCanisterId: String
+    ) throws -> ICCBOR.Value {
+        guard requestID.count == 32,
+              let canister = ICPrincipal.parse(canisterId),
+              ICPrincipal.parse(effectiveCanisterId) != nil,
+              ICPrincipal.parse(authorizationCanisterId) != nil,
+              !method.isEmpty,
+              ingressExpiry > Date(),
+              ingressExpiry.timeIntervalSinceNow <= ICRequestOptions.maximumIngressTTL else {
+            throw ICClientError.invalidConfiguration("Signed request metadata is invalid or expired.")
+        }
+        let envelopeFields = try ICCBOR.requiredMap(ICCBOR.decodeStrict(envelope), context: "signed request envelope")
+        let content = try ICCBOR.requiredValue(envelopeFields, key: "content", context: "signed request envelope")
+        let fields = try ICCBOR.requiredMap(content, context: "signed request content")
+        guard case .text(let requestType) = try ICCBOR.requiredValue(fields, key: "request_type", context: "signed request content"),
+              requestType == expectedType,
+              case .bytes(let contentCanister) = try ICCBOR.requiredValue(fields, key: "canister_id", context: "signed request content"),
+              contentCanister == canister,
+              case .text(let contentMethod) = try ICCBOR.requiredValue(fields, key: "method_name", context: "signed request content"),
+              contentMethod == method,
+              case .unsigned(let contentExpiry) = try ICCBOR.requiredValue(fields, key: "ingress_expiry", context: "signed request content"),
+              Date(timeIntervalSince1970: Double(contentExpiry) / 1_000_000_000) == ingressExpiry,
+              ICRequestID.hash(of: content) == requestID,
+              case .bytes(let sender) = try ICCBOR.requiredValue(fields, key: "sender", context: "signed request content"),
+              case .bytes(let senderPublicKey) = try ICCBOR.requiredValue(envelopeFields, key: "sender_pubkey", context: "signed request envelope"),
+              sender == ICPrincipal.selfAuthenticatingPublicKey(senderPublicKey),
+              case .bytes(let senderSignature) = try ICCBOR.requiredValue(envelopeFields, key: "sender_sig", context: "signed request envelope") else {
+            throw ICClientError.invalidIdentity("Signed request metadata does not match its envelope.")
+        }
+        if let nonce = ICCBOR.optionalValue(fields, key: "nonce") {
+            guard case .bytes(let bytes) = nonce,
+                  !bytes.isEmpty, bytes.count <= ICRequestOptions.maximumNonceBytes else {
+                throw ICClientError.invalidConfiguration("Signed request nonce is invalid.")
+            }
+        }
+        let chain = try delegationChain(from: envelopeFields, publicKey: senderPublicKey)
+        let leafKey = try ICIdentityValidation.validateEnvelopeDelegationChain(
+            chain,
+            canisterId: authorizationCanisterId,
+            permission: expectedType == "query" ? .query : .call,
+            requestExpiration: contentExpiry,
+            trustRoot: configuration.trustRoot
+        )
+        try Self.verifyEnvelopeSignature(senderSignature, requestID: requestID, derPublicKey: leafKey)
+        return content
+    }
+
+    private func delegationChain(
+        from envelopeFields: [(ICCBOR.Value, ICCBOR.Value)],
+        publicKey: Data
+    ) throws -> ICDelegationChain {
+        guard case .array(let values) = try ICCBOR.requiredValue(
+            envelopeFields, key: "sender_delegation", context: "signed request envelope"
+        ) else {
+            throw ICClientError.invalidIdentity("Signed request delegation chain is invalid.")
+        }
+        let signed = try values.map { value -> ICDelegationChain.SignedDelegation in
+            let fields = try ICCBOR.requiredMap(value, context: "signed request delegation")
+            let delegationValue = try ICCBOR.requiredValue(fields, key: "delegation", context: "signed request delegation")
+            let delegationFields = try ICCBOR.requiredMap(delegationValue, context: "signed request delegation")
+            guard case .bytes(let key) = try ICCBOR.requiredValue(delegationFields, key: "pubkey", context: "signed request delegation"),
+                  case .unsigned(let expiration) = try ICCBOR.requiredValue(delegationFields, key: "expiration", context: "signed request delegation"),
+                  case .bytes(let signature) = try ICCBOR.requiredValue(fields, key: "signature", context: "signed request delegation") else {
+                throw ICClientError.invalidIdentity("Signed request delegation chain is invalid.")
+            }
+            let targets: [Data]?
+            if let value = ICCBOR.optionalValue(delegationFields, key: "targets") {
+                guard case .array(let items) = value else { throw ICClientError.invalidIdentity("Signed request targets are invalid.") }
+                targets = try items.map {
+                    guard case .bytes(let target) = $0 else { throw ICClientError.invalidIdentity("Signed request target is invalid.") }
+                    return target
+                }
+            } else { targets = nil }
+            let permissions: ICDelegationPermission?
+            if let value = ICCBOR.optionalValue(delegationFields, key: "permissions") {
+                guard case .text(let raw) = value, let parsed = ICDelegationPermission(rawValue: raw) else {
+                    throw ICClientError.invalidIdentity("Signed request permissions are invalid.")
+                }
+                permissions = parsed
+            } else { permissions = nil }
+            return ICDelegationChain.SignedDelegation(
+                delegation: .init(publicKey: key, expiration: expiration, targets: targets, permissions: permissions),
+                signature: signature
+            )
+        }
+        return ICDelegationChain(publicKey: publicKey, delegations: signed)
+    }
+
+    private static func verifyEnvelopeSignature(_ signature: Data, requestID: Data, derPublicKey: Data) throws {
+        let challenge = Data([0x0a]) + Data("ic-request".utf8) + requestID
+        do {
+            try ICCertificateVerifier.validateEd25519DERKey(derPublicKey)
+            let raw = derPublicKey.dropFirst(ICRC167Codec.ed25519DERPrefix.count)
+            let key = try Curve25519.Signing.PublicKey(rawRepresentation: raw)
+            guard key.isValidSignature(signature, for: challenge) else { throw ICClientError.invalidIdentity("Signed request signature is invalid.") }
+        } catch let error as ICClientError {
+            throw error
+        } catch {
+            throw ICClientError.invalidIdentity("Signed request signature is invalid.")
+        }
     }
 
     private func verifiedSubnet(
@@ -420,35 +1141,52 @@ public final class ICClient: @unchecked Sendable {
         canister: Data,
         method: String,
         arg: Data,
-        identity: ICAuthSession
+        identity: ICAuthSession,
+        ingressExpiry: UInt64,
+        nonce: Data?
     ) -> ICCBOR.Value {
-        .map([
+        var fields: [(ICCBOR.Value, ICCBOR.Value)] = [
             (.text("request_type"), .text(type)),
             (.text("canister_id"), .bytes(canister)),
             (.text("method_name"), .text(method)),
             (.text("arg"), .bytes(arg)),
             (.text("sender"), .bytes(ICPrincipal.selfAuthenticatingPublicKey(identity.delegation.publicKey))),
-            (.text("ingress_expiry"), .unsigned(Self.ingressExpiry())),
-        ])
+            (.text("ingress_expiry"), .unsigned(ingressExpiry)),
+        ]
+        if let nonce { fields.append((.text("nonce"), .bytes(nonce))) }
+        return .map(fields)
     }
 
-    private func anonymousRequestContent(type: String, canister: Data, method: String, arg: Data) -> ICCBOR.Value {
-        .map([
+    private func anonymousRequestContent(
+        type: String,
+        canister: Data,
+        method: String,
+        arg: Data,
+        ingressExpiry: UInt64,
+        nonce: Data?
+    ) -> ICCBOR.Value {
+        var fields: [(ICCBOR.Value, ICCBOR.Value)] = [
             (.text("request_type"), .text(type)),
             (.text("canister_id"), .bytes(canister)),
             (.text("method_name"), .text(method)),
             (.text("arg"), .bytes(arg)),
             (.text("sender"), .bytes(Data([0x04]))),
-            (.text("ingress_expiry"), .unsigned(Self.ingressExpiry())),
-        ])
+            (.text("ingress_expiry"), .unsigned(ingressExpiry)),
+        ]
+        if let nonce { fields.append((.text("nonce"), .bytes(nonce))) }
+        return .map(fields)
     }
 
-    private func readStateContent(paths: [[Data]], identity: ICAuthSession?) -> ICCBOR.Value {
+    private func readStateContent(
+        paths: [[Data]],
+        identity: ICAuthSession?,
+        ingressExpiry: UInt64? = nil
+    ) -> ICCBOR.Value {
         .map([
             (.text("request_type"), .text("read_state")),
             (.text("paths"), .array(paths.map { .array($0.map(ICCBOR.Value.bytes)) })),
             (.text("sender"), .bytes(identity.map { ICPrincipal.selfAuthenticatingPublicKey($0.delegation.publicKey) } ?? Data([0x04]))),
-            (.text("ingress_expiry"), .unsigned(Self.ingressExpiry())),
+            (.text("ingress_expiry"), .unsigned(ingressExpiry ?? Self.ingressExpiry())),
         ])
     }
 
@@ -458,16 +1196,16 @@ public final class ICClient: @unchecked Sendable {
     }
 
     private static func ingressExpiry() -> UInt64 {
-        UInt64((Date().timeIntervalSince1970 + 300) * 1_000_000_000)
+        UInt64((Date().timeIntervalSince1970 + ICRequestOptions.maximumIngressTTL) * 1_000_000_000)
     }
 
-    private func callRawV2(
+    private func submitRawV2(
         envelope: Data,
         requestID: Data,
         method: String,
         effectiveText: String,
-        identity: ICAuthSession
-    ) async throws -> Data {
+        sender: Data
+    ) async throws -> ICUpdateSubmission {
         let (data, response) = try await postCBOR(
             envelope,
             to: apiURL(for: "call", canisterId: effectiveText, version: .v2),
@@ -480,7 +1218,26 @@ public final class ICClient: @unchecked Sendable {
             let fields = try ICCBOR.requiredMap(ICCBOR.decodeStrict(data), context: "v2 call rejection")
             throw ICClientError.rejected(try parseReject(fields, context: "v2 rejection"))
         }
-        return try await poll(requestId: requestID, canisterId: effectiveText, identity: identity)
+        return updateSubmission(
+            requestID: requestID,
+            effectiveCanisterId: effectiveText,
+            status: .pending,
+            sender: sender
+        )
+    }
+
+    private func updateSubmission(
+        requestID: Data,
+        effectiveCanisterId: String,
+        status: ICCertificateStatus,
+        sender: Data
+    ) -> ICUpdateSubmission {
+        ICUpdateSubmission(
+            requestID: requestID,
+            effectiveCanisterId: effectiveCanisterId,
+            initialStatus: status,
+            sender: sender
+        )
     }
 
     private func resolve(
@@ -493,7 +1250,7 @@ public final class ICClient: @unchecked Sendable {
         case .replied(let data): return data
         case .rejected(let reject): throw ICClientError.rejected(reject)
         case .done: throw ICClientError.requestDoneWithoutReply
-        case .absent, .pending:
+        case .absent, .pending, .received, .processing:
             return try await poll(requestId: requestID, canisterId: effectiveText, identity: identity)
         }
     }

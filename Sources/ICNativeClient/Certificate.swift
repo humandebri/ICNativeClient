@@ -155,9 +155,11 @@ indirect enum ICHashTree: Sendable {
     }
 }
 
-enum ICCertificateStatus: Equatable {
+enum ICCertificateStatus: Equatable, Sendable {
     case absent
     case pending
+    case received
+    case processing
     case replied(Data)
     case rejected(ICReject)
     case done
@@ -222,7 +224,8 @@ enum ICCertificateVerifier {
         case .found(let bytes):
             guard let status = String(data: bytes, encoding: .utf8) else { throw ICClientError.invalidResponse("request status UTF-8") }
             switch status {
-            case "received", "processing": return .pending
+            case "received": return .received
+            case "processing": return .processing
             case "done": return .done
             case "replied":
                 guard case .found(let reply) = certificate.tree.lookup(base + [Data("reply".utf8)]) else {
